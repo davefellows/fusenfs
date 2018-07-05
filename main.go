@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -17,18 +18,23 @@ import (
 )
 
 const (
-	// IsfileCachedHandlerName = "RpcHandler.IsFileCached"
-	fileCachedHandlerName  = "RpcHandler.FileCachedEvent"
-	getFileDataHandlerName = "RpcHandler.GetFileData"
+	// IsfileCachedHandlerName = "RPCHandler.IsFileCached"
+	fileCachedHandlerName  = "RPCHandler.FileCachedEvent"
+	getFileDataHandlerName = "RPCHandler.GetFileData"
 )
 
 var (
+	nfshost   = flag.String("NFS-server", "localhost", "The hostname/IP for the NFS Server.")
+	target    = flag.String("NFS-target", "/C/temp", "The target/path on the NFS Server.")
+	remoteips = flag.String("RemoteIPs", "localhost", "Comma separate list of IPs for remote servers.")
+	rpcPort   = flag.String("RemotePort", "5555", "Port to use for connection with remote servers.")
+
 	nfsfs     *Nfsfs
 	nfstarget *nfs.Target
 
 	// cacheremotes = []string{"localhost"}
-	cacheport = "5555"
 
+	remoteServers     []string
 	remoteCachedFiles map[string]string
 )
 
@@ -101,19 +107,16 @@ type CachedDataResponse struct {
 // 	rpcclient *rpc.Client
 // }
 
-// RpcHandler handler type for our RPC calls
-type RpcHandler struct{}
+// RPCHandler handler type for our RPC calls
+type RPCHandler struct{}
 
 func main() {
-
-	// NFS Settings
-	nfshost := "localhost"
-	target := "/C/temp"
-
-	go setupRPCListener(cacheport)
 	remoteCachedFiles = make(map[string]string)
+	remoteServers = strings.Split(*remoteips, ",")
 
-	mount, err := nfs.DialMount(nfshost)
+	go setupRPCListener(*rpcPort)
+
+	mount, err := nfs.DialMount(*nfshost)
 	if err != nil {
 		log.Fatalf("unable to dial MOUNT service: %v", err)
 		return
@@ -123,7 +126,7 @@ func main() {
 	//TODO: Check if needed
 	auth := nfsrpc.NewAuthUnix("", 1001, 1001)
 
-	nfstarget, err = mount.Mount(target, auth.Auth())
+	nfstarget, err = mount.Mount(*target, auth.Auth())
 	if err != nil {
 		log.Fatalf("unable to mount volume: %v", err)
 		return
@@ -144,7 +147,7 @@ func setupRPCListener(port string) {
 
 	defer listener.Close()
 
-	err = rpc.Register(new(RpcHandler))
+	err = rpc.Register(new(RPCHandler))
 	if err != nil {
 		log.Fatalf("Error registering RPC handler. %v", err)
 		return
@@ -229,7 +232,7 @@ func tryRemoteCache(filepath string, fh uint64, offset, endoffset int64, buff []
 
 func destConnection(address string) (*rpc.Client, error) {
 
-	client, err := rpc.Dial("tcp", address+":"+cacheport)
+	client, err := rpc.Dial("tcp", address+":"+*rpcPort)
 	if err != nil {
 		return nil, err
 	}
@@ -485,7 +488,7 @@ func reduceFileCache(node *Node, filepath string) {
 	}
 	if highest-lowest == node.stat.Size {
 		// fmt.Println("reduceFileCache CACHED file", filepath)
-		broadcastCachedFile("localhost", filepath, 0)
+		broadcastCachedFile(remoteServers[0], filepath, 0)
 	}
 }
 
@@ -507,7 +510,7 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 			break
 		}
 
-		if offset > br.low && offset < br.high {
+		if offset >= br.low && offset < br.high {
 			// extend cache
 			br.high = endoffset
 			extendCacheItem = true
@@ -702,7 +705,7 @@ func (fs *Nfsfs) synchronize() func() {
 /// **RPC Handler methods** ///
 
 // FileCachedEvent adds/updates the remoteCachedFiles map
-func (h *RpcHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateResponse) (err error) {
+func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateResponse) (err error) {
 
 	if req.Filepath == "" {
 		return errors.New("a file path must be specified")
@@ -717,7 +720,7 @@ func (h *RpcHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 }
 
 // GetFileData gets the requested byte range for the specified file
-func (h *RpcHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse) (err error) {
+func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse) (err error) {
 
 	// fmt.Println("2. GetFileData() - Buffer len: ", len(res.Filedata), len(req.Filedata))
 
