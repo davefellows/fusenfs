@@ -482,10 +482,11 @@ func reduceFileCache(node *Node, filepath string) {
 	var lowest, highest int64
 
 	sort.Slice(node.cache.byteRanges, func(i, j int) bool {
-		return node.cache.byteRanges[i].low < node.cache.byteRanges[j].high
+		return node.cache.byteRanges[i].low < node.cache.byteRanges[j].low
 	})
 
 	for _, br := range node.cache.byteRanges {
+		// fmt.Println(br.low, br.high, lowest, highest)
 		// 1. range extends the previous one above
 		if br.low <= highest && br.high > highest {
 			highest = br.high
@@ -497,11 +498,15 @@ func reduceFileCache(node *Node, filepath string) {
 			lowest = br.low
 			continue
 		}
-		//TODO: Need to unit test this one!
 		// 3. If neither of the above then we need to keep this range
-		newByteRanges = append(newByteRanges, br)
+		newByteRanges = append(newByteRanges, ByteRange{low: lowest, high: highest})
+		lowest = max(lowest, br.low)
+		highest = max(highest, br.high)
 	}
+
+	// if we've made changes then
 	if highest != 0 {
+		// fmt.Println(lowest, highest)
 		newByteRanges = append(newByteRanges, ByteRange{low: lowest, high: highest})
 
 		// fmt.Println("reduceFileCache LEN: ", len(newByteRanges))
@@ -773,6 +778,13 @@ func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse)
 	res.NumbBytes, _ = fetchLocalCacheData(node, req.Offset, req.Endoffset, res.Filedata)
 	fmt.Println("2.1 GetFileData() - Ret data: ", res.NumbBytes)
 	return
+}
+
+func max(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // func checkRemoteCaches(filepath string, fh uint64) *CacheRef {

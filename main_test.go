@@ -72,6 +72,128 @@ func TestCanExpandLocalCacheLow(t *testing.T) {
 	}
 }
 
+func TestReduceCache(t *testing.T) {
+	node := createTestNode()
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 10, high: 20})
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 20, high: 30})
+
+	reduceFileCache(node, "")
+
+	if len(node.cache.byteRanges) != 1 {
+		t.Error("Expected one byte range after reduction. Got", len(node.cache.byteRanges))
+	}
+
+	low := node.cache.byteRanges[0].low
+	high := node.cache.byteRanges[0].high
+	if low != 0 || high != 30 {
+		t.Error("Expected low=0, high=30. Got", low, high)
+	}
+}
+
+func TestReduceCacheOutOfOrder(t *testing.T) {
+	node := createTestNode()
+	// byte ranges out of order
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 10, high: 20})
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 20, high: 30})
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
+
+	reduceFileCache(node, "")
+
+	if len(node.cache.byteRanges) != 1 {
+		t.Error("Expected one byte range after reduction. Got", len(node.cache.byteRanges))
+	}
+
+	low := node.cache.byteRanges[0].low
+	high := node.cache.byteRanges[0].high
+	if low != 0 || high != 30 {
+		t.Error("Expected low=0, high=30. Got", low, high)
+	}
+}
+
+func TestReduceCacheOutOfOrderWithGaps(t *testing.T) {
+	node := createTestNode()
+	// byte ranges out of order
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 10, high: 20})
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 20, high: 30})
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
+	// Gap
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 40, high: 50})
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 45, high: 60})
+	// Gap
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 61, high: 70})
+
+	reduceFileCache(node, "")
+
+	for _, br := range node.cache.byteRanges {
+		t.Log(br)
+	}
+
+	if len(node.cache.byteRanges) != 3 {
+		t.Error("Expected 3 byte ranges after reduction. Got", len(node.cache.byteRanges))
+	}
+
+}
+
+func TestUpdateLocalCache(t *testing.T) {
+	node := createTestNode()
+
+	buff := make([]byte, 5)
+	node.data = buff
+	node.stat.Size = 10
+
+	// Use an endoffset (6) that is larger than the current
+	// node.data length but less than node.stat.Size
+	updateLocalCache(true, "", node, buff, 0, 6)
+
+	if len(node.cache.byteRanges) != 1 {
+		t.Error("Expected one byte range after reduction. Got", len(node.cache.byteRanges))
+	}
+
+	if int64(len(node.data)) != node.stat.Size {
+		t.Error("Expected node.data length to be equal to node.stat.Size. ", len(node.data), node.stat.Size)
+	}
+}
+
+func TestUpdateLocalCacheNoNewByteRange(t *testing.T) {
+	node := createTestNode()
+
+	buff := make([]byte, 5)
+	node.data = buff
+	node.stat.Size = 10
+
+	// Use an endoffset (6) that is larger than the current
+	// node.data length but less than node.stat.Size
+	updateLocalCache(false, "", node, buff, 0, 6)
+
+	if len(node.cache.byteRanges) != 0 {
+		t.Error("Expected no byte rangse after reduction. Got", len(node.cache.byteRanges))
+	}
+
+	if int64(len(node.data)) != node.stat.Size {
+		t.Error("Expected node.data length to be equal to node.stat.Size. ", len(node.data), node.stat.Size)
+	}
+}
+
+func TestUpdateLocalCacheNoExtendNodeData(t *testing.T) {
+	node := createTestNode()
+
+	buff := make([]byte, 5)
+	node.data = buff
+	node.stat.Size = 10
+
+	// Use an endoffset (5) that same as current node.data length
+	updateLocalCache(false, "", node, buff, 0, 5)
+
+	if len(node.cache.byteRanges) != 0 {
+		t.Error("Expected no byte rangse after reduction. Got", len(node.cache.byteRanges))
+	}
+
+	if len(node.data) != 5 {
+		t.Error("Expected node.data length to still be 5. ", len(node.data))
+	}
+}
+
 func createTestNode() *Node {
 	return &Node{
 		cache:    FileCache{},
