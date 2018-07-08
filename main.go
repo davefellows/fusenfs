@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -24,9 +25,11 @@ const (
 )
 
 var (
-	nfshost   = flag.String("NFS-server", "localhost", "The hostname/IP for the NFS Server.")
+	nfshost   = flag.String("NFS-server", "", "The hostname/IP for the NFS Server.")
 	target    = flag.String("NFS-target", "/C/temp", "The target/path on the NFS Server.")
-	remoteips = flag.String("RemoteIPs", "localhost", "Comma separate list of IPs for remote servers.")
+	mntpoint  = flag.String("mount-point", "", "Where to mount the file system.")
+	thisip    = flag.String("ThisIP", "", "The IP address of this server for cache requests.")
+	remoteips = flag.String("RemoteIPs", "", "Comma separate list of IPs for remote servers.")
 	rpcPort   = flag.String("RemotePort", "5555", "Port to use for connection with remote servers.")
 
 	nfsfs     *Nfsfs
@@ -111,10 +114,18 @@ type CachedDataResponse struct {
 type RPCHandler struct{}
 
 func main() {
+	flag.Parse()
+
+	log.Println("Remote host:", *nfshost)
+
 	remoteCachedFiles = make(map[string]string)
 	remoteServers = strings.Split(*remoteips, ",")
 
-	go setupRPCListener(*rpcPort)
+	fmt.Println("RemoteServers:", *remoteips, remoteServers)
+
+	if len(remoteServers) > 0 {
+		go setupRPCListener(*rpcPort)
+	}
 
 	mount, err := nfs.DialMount(*nfshost)
 	if err != nil {
@@ -124,7 +135,7 @@ func main() {
 	defer mount.Close()
 
 	//TODO: Check if needed
-	auth := nfsrpc.NewAuthUnix("", 1001, 1001)
+	auth := nfsrpc.NewAuthUnix("dafellnfs-wus", 1000, 1000)
 
 	nfstarget, err = mount.Mount(*target, auth.Auth())
 	if err != nil {
@@ -135,7 +146,7 @@ func main() {
 
 	nfsfs = newfs() // &Nfsfs{}
 	host := fuse.NewFileSystemHost(nfsfs)
-	host.Mount("", os.Args[1:])
+	host.Mount(*mntpoint, []string{})
 }
 
 func setupRPCListener(port string) {
@@ -169,6 +180,8 @@ func newfs() *Nfsfs {
 // that a file has been cached in memory
 func broadcastCachedFile(address, filepath string, fh uint64) {
 
+	fmt.Println("broadcastCachedFile() - Address:", address, filepath)
+
 	client, err := destConnection(address)
 	if err != nil {
 		fmt.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
@@ -176,7 +189,7 @@ func broadcastCachedFile(address, filepath string, fh uint64) {
 	}
 	defer client.Close()
 
-	request := &CacheUpdateRequest{Fromip: address, Filepath: filepath, Fh: fh}
+	request := &CacheUpdateRequest{Fromip: *thisip, Filepath: filepath, Fh: fh}
 	response := new(CacheUpdateResponse)
 	err = client.Call(fileCachedHandlerName, request, response)
 
@@ -201,7 +214,7 @@ func tryRemoteCache(filepath string, fh uint64, offset, endoffset int64, buff []
 	client, err := destConnection(address)
 	if err != nil {
 		fmt.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
-		os.Exit(2)
+		return 0
 	}
 	defer client.Close()
 
@@ -251,7 +264,7 @@ func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
 
 // Getattr gets the attributes for a specified node
 func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
-	// fmt.Println("Getattr() path: ", path)
+	fmt.Println("Getattr() path: ", path)
 
 	// defer trace(path, fh)(&errc, stat)
 	defer fs.synchronize()()
@@ -309,6 +322,8 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 
 	node := fs.getNode(path, fh)
 
+	// log.Println("Read() - In")
+
 	if node == nil {
 		return -fuse.ENOENT
 	}
@@ -320,7 +335,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	if endoffset < offset {
 		return 0
 	}
-	// fmt.Println("\n1. Read() - offsets:\t\t\t", endoffset-offset, len(buff), node.stat.Size, path)
+	// fmt.Println("\n1. Read() - offsets:\t\t\t", offset, endoffset, path)
 
 	// 1. See if we have this byte range cached locally in memory
 	numb, extendedCacheItem := fetchLocalCacheData(node, offset, endoffset, buff)
@@ -342,6 +357,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 		return numb
 	}
 
+	// log.Println("Read() - Before read NFS")
 	// 3. Otherwise, let's get our file from NFS
 	numb = readFileFromNFS(path, node, buff, offset, endoffset)
 
@@ -399,6 +415,8 @@ func (fs *Nfsfs) Readdir(path string,
 		mode := uint32(dir.Attr.Attr.Mode())
 		if dir.Attr.Attr.IsDir() {
 			mode = fuse.S_IFDIR | (mode & 07777)
+		} else {
+			mode = fuse.S_IFREG | (mode & 0444)
 		}
 
 		child := newNode(0, fs.ino, mode, dir.Attr.Attr.UID, dir.Attr.Attr.GID)
@@ -450,7 +468,8 @@ func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff [
 	}
 
 	if int64(len(node.data)) < endoffset {
-		node.data = resize(node.data, endoffset, true)
+		// Resize for the entire file so we don't resize every time
+		node.data = resize(node.data, node.stat.Size, false)
 	}
 	copy(node.data[offset:endoffset], buff)
 }
@@ -462,16 +481,25 @@ func reduceFileCache(node *Node, filepath string) {
 	var newByteRanges []ByteRange
 	var lowest, highest int64
 
+	sort.Slice(node.cache.byteRanges, func(i, j int) bool {
+		return node.cache.byteRanges[i].low < node.cache.byteRanges[j].high
+	})
+
 	for _, br := range node.cache.byteRanges {
 		// 1. range extends the previous one above
 		if br.low <= highest && br.high > highest {
 			highest = br.high
+			continue
 		}
 
 		// 2. range extends the previous one below
 		if br.high >= lowest && br.low < lowest {
 			lowest = br.low
+			continue
 		}
+		//TODO: Need to unit test this one!
+		// 3. If neither of the above then we need to keep this range
+		newByteRanges = append(newByteRanges, br)
 	}
 	if highest != 0 {
 		newByteRanges = append(newByteRanges, ByteRange{low: lowest, high: highest})
@@ -487,8 +515,10 @@ func reduceFileCache(node *Node, filepath string) {
 		node.cache.lock.Unlock()
 	}
 	if highest-lowest == node.stat.Size {
-		// fmt.Println("reduceFileCache CACHED file", filepath)
-		broadcastCachedFile(remoteServers[0], filepath, 0)
+		fmt.Println("reduceFileCache CACHED file", filepath)
+		if len(remoteServers) > 0 {
+			broadcastCachedFile(remoteServers[0], filepath, 0)
+		}
 	}
 }
 
@@ -503,7 +533,6 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 
 	node.cache.lock.Lock()
 	for _, br := range node.cache.byteRanges {
-		// fmt.Println("Read - Cache line: ", br.low, ":", br.high)
 		if offset >= br.low && endoffset <= br.high {
 			// fmt.Println("fetchLocalCacheData() - Cache hit!")
 			cacheHit = true
@@ -537,7 +566,7 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 
 	file, err := nfstarget.Open(path)
 	if err != nil {
-		fmt.Println("Read - Open Error: ", err.Error())
+		log.Fatal("Read - Open Error: ", err.Error())
 		return 0
 	}
 
@@ -546,7 +575,7 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 	for {
 		_, err = file.Seek(newoffset, io.SeekStart)
 		if err != nil {
-			fmt.Println("Read - Seek Error: ", err.Error())
+			log.Fatal("Read - Seek Error: ", err.Error())
 			return 0
 		}
 
@@ -559,7 +588,7 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 
 		if err != nil {
 			//TODO: Error handling
-			fmt.Println("Read - Error: ", err.Error())
+			log.Fatal("Read - Error: ", err.Error())
 			return 0
 		}
 
@@ -722,12 +751,16 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 // GetFileData gets the requested byte range for the specified file
 func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse) (err error) {
 
-	// fmt.Println("2. GetFileData() - Buffer len: ", len(res.Filedata), len(req.Filedata))
+	fmt.Println("2. GetFileData() - Buffer len: ", len(req.Filedata), req.Filepath, req.Fh)
 
 	if req.Filepath == "" {
 		return errors.New("a file path must be specified")
 	}
 	node := nfsfs.getNode(req.Filepath, req.Fh)
+
+	if node == nil {
+		return errors.New("node reference not found for " + req.Filepath + " FH:" + string(req.Fh))
+	}
 
 	if len(node.cache.byteRanges) == 0 {
 		return errors.New("no cache data found for file: " + req.Filepath)
@@ -738,6 +771,7 @@ func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse)
 	res.Filedata = req.Filedata
 
 	res.NumbBytes, _ = fetchLocalCacheData(node, req.Offset, req.Endoffset, res.Filedata)
+	fmt.Println("2.1 GetFileData() - Ret data: ", res.NumbBytes)
 	return
 }
 
