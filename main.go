@@ -176,95 +176,20 @@ func newfs() *Nfsfs {
 	return &fs
 }
 
-// broadcastCachedFile informs any remote servers
-// that a file has been cached in memory
-func broadcastCachedFile(address, filepath string, fh uint64) {
-
-	fmt.Println("broadcastCachedFile() - Address:", address, filepath)
-
-	client, err := destConnection(address)
-	if err != nil {
-		fmt.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
-		os.Exit(2)
-	}
-	defer client.Close()
-
-	request := &CacheUpdateRequest{Fromip: *thisip, Filepath: filepath, Fh: fh}
-	response := new(CacheUpdateResponse)
-	err = client.Call(fileCachedHandlerName, request, response)
-
-	if err != nil {
-		fmt.Println("Error calling FileCachedEvent: ", filepath, err.Error())
-	}
-
-}
-
-// tryRemoteCache first checks if a file has been broadcast as
-// cached by a remote server then requests the required data range
-func tryRemoteCache(filepath string, fh uint64, offset, endoffset int64, buff []byte) (numb int) {
-
-	address, ok := remoteCachedFiles[filepath]
-
-	if !ok {
-		return 0
-	}
-
-	// fmt.Println("RemoteCache - ", filepath, len(buff), endoffset-offset, offset, endoffset)
-
-	client, err := destConnection(address)
-	if err != nil {
-		fmt.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
-		return 0
-	}
-	defer client.Close()
-
-	request := &CachedDataRequest{
-		Filepath:  filepath,
-		Fh:        fh,
-		Offset:    offset,
-		Endoffset: endoffset,
-		Filedata:  buff, // HACK: this shouldn't be needed but response buffer comes through empty
-	}
-	response := new(CachedDataResponse)
-	//TODO: Figure out why response buffer doesn't make to through RPC call
-	response.Filedata = buff
-
-	err = client.Call(getFileDataHandlerName, request, response)
-
-	if err != nil {
-		fmt.Println("Error calling tryRemoteCache: ", filepath, err.Error())
-	}
-
-	if response.NumbBytes > 0 {
-		fmt.Println("4.1 RemoteCache GOT DATA.", filepath, response.NumbBytes)
-	} else {
-		fmt.Println("4.2 RemoteCache NO DATA RECEIVED.", filepath)
-	}
-	return response.NumbBytes
-}
-
-func destConnection(address string) (*rpc.Client, error) {
-
-	client, err := rpc.Dial("tcp", address+":"+*rpcPort)
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
-}
-
 // Open opens the specified node
 func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
-	// fmt.Println("Open() path: ", path)
 
 	// defer trace(path, flags)(&errc, &fh)
 	defer fs.synchronize()()
 
-	return fs.openNode(path, false)
+	errc, fh = fs.openNode(path, false)
+	fmt.Println("Open() path: ", path, fh)
+	return
 }
 
 // Getattr gets the attributes for a specified node
 func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
-	fmt.Println("Getattr() path: ", path)
+	fmt.Println("Getattr() path: ", path, fh)
 
 	// defer trace(path, fh)(&errc, stat)
 	defer fs.synchronize()()
@@ -348,7 +273,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	}
 
 	// 2. See if we have this file cached with one of our remotes
-	numb = tryRemoteCache(path, fh, offset, endoffset, buff)
+	numb = tryRemoteCache(path, fh, node, offset, endoffset, buff)
 
 	if numb > 0 {
 		if len(node.cache.byteRanges) > 1 {
@@ -369,7 +294,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 
 // Release releases the specified file handle
 func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
-	// fmt.Println("Release() path: ", path)
+	fmt.Println("Release() path: ", path, fh)
 	// defer trace(path, fh)(&errc)
 	defer fs.synchronize()()
 	// node := fs.getNode(path, fh)
@@ -520,9 +445,10 @@ func reduceFileCache(node *Node, filepath string) {
 		node.cache.lock.Unlock()
 	}
 	if highest-lowest == node.stat.Size {
-		fmt.Println("reduceFileCache CACHED file", filepath)
+		// fmt.Println("reduceFileCache CACHED file", filepath)
 		if len(remoteServers) > 0 {
-			broadcastCachedFile(remoteServers[0], filepath, 0)
+			//TODO: Test Ino/FH
+			broadcastCachedFile(remoteServers[0], filepath, node.stat.Ino)
 		}
 	}
 }
@@ -533,7 +459,7 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 	buff []byte) (numBytes int, extendCacheItem bool) {
 
 	cacheHit := false
-	// fmt.Println("3. fetchLocalCacheData() - ByteRanges: ", len(node.cache.byteRanges), offset, endoffset, len(buff))
+	// fmt.Println("fetchLocalCacheData() - ByteRanges: ", len(node.cache.byteRanges), offset, endoffset, len(buff))
 	// fmt.Println("\nRead() - offsets:", endoffset-offset, len(buff), node.stat.Size, path)
 
 	node.cache.lock.Lock()
@@ -559,10 +485,65 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 	node.cache.lock.Unlock()
 
 	if cacheHit {
+		fmt.Println("fetchLocalCacheData() - Cache Hit!", offset, endoffset, len(buff))
 		copy(buff, node.data[offset:endoffset])
 		numBytes = int(endoffset - offset)
 	}
 	return
+}
+
+// tryRemoteCache first checks if a file has been broadcast as
+// cached by a remote server then requests the required data range
+func tryRemoteCache(path string, fh uint64,
+	node *Node, offset, endoffset int64, buff []byte) (numb int) {
+
+	address, ok := remoteCachedFiles[path]
+	if !ok {
+		return 0
+	}
+
+	fmt.Println("RemoteCache - ", path, len(buff), endoffset-offset, offset, endoffset)
+
+	client, err := destConnection(address)
+	if err != nil {
+		fmt.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
+		return 0
+	}
+	defer client.Close()
+
+	return getRemoteCacheData(path, fh, node, offset, endoffset, buff, client.Call)
+}
+
+func getRemoteCacheData(filepath string, fh uint64,
+	node *Node, offset, endoffset int64, buff []byte,
+	rpcCall func(method string, args interface{}, reply interface{}) error) (numb int) {
+
+	request := &CachedDataRequest{
+		Filepath:  filepath,
+		Fh:        fh,
+		Offset:    offset,
+		Endoffset: endoffset,
+		Filedata:  buff, // HACK: this shouldn't be needed but response buffer comes through empty
+	}
+	response := new(CachedDataResponse)
+	//TODO: Figure out why response buffer doesn't make to through RPC call
+	// response.Filedata = buff
+
+	//TODO: Mock with function
+	err := rpcCall(getFileDataHandlerName, request, response)
+	if err != nil {
+		fmt.Println("Error calling tryRemoteCache: ", filepath, err.Error())
+	}
+
+	if response.NumbBytes > 0 {
+		// fmt.Println("4.1 RemoteCache GOT DATA.", filepath, response.NumbBytes)
+		copy(buff, response.Filedata)
+		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
+	} else {
+		fmt.Println("4.2 RemoteCache NO DATA RECEIVED.", filepath)
+	}
+	return response.NumbBytes
+
 }
 
 // readFileFromNFS reads the specified file from the NFS server
@@ -607,6 +588,44 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 	return numb
 }
 
+// broadcastCachedFile informs any remote servers
+// that a file has been cached in memory
+func broadcastCachedFile(address, filepath string, fh uint64) {
+
+	fmt.Println("broadcastCachedFile() - Address:", address, filepath, fh)
+
+	client, err := destConnection(address)
+	if err != nil {
+		fmt.Println("broadcastCachedFile() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
+		os.Exit(2)
+	}
+	defer client.Close()
+
+	request := &CacheUpdateRequest{Fromip: *thisip, Filepath: filepath, Fh: fh}
+	response := new(CacheUpdateResponse)
+	err = client.Call(fileCachedHandlerName, request, response)
+
+	if err != nil {
+		fmt.Println("broadcastCachedFile() - Error calling FileCachedEvent: ", filepath, err.Error())
+	}
+
+	//TODO: Remove - just here for debugging
+	node := nfsfs.getNode(filepath, fh)
+	if node == nil {
+		fmt.Println("broadcastCachedFile() - Nil Node (getNode): ", filepath, fh)
+	}
+
+}
+
+func destConnection(address string) (*rpc.Client, error) {
+
+	client, err := rpc.Dial("tcp", address+":"+*rpcPort)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
+}
+
 func (fs *Nfsfs) getNode(path string, fh uint64) *Node {
 
 	if fh == ^uint64(0) {
@@ -643,9 +662,9 @@ func (fs *Nfsfs) openNode(path string, dir bool) (errc int, fh uint64) {
 func (fs *Nfsfs) closeNode(fh uint64) int {
 	node := fs.openmap[fh]
 	node.opencnt--
-	if 0 == node.opencnt {
-		delete(fs.openmap, node.stat.Ino)
-	}
+	// if 0 == node.opencnt {
+	// 	delete(fs.openmap, node.stat.Ino)
+	// }
 	return 0
 }
 
@@ -748,7 +767,7 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 	//TODO: add locking here
 	remoteCachedFiles[req.Filepath] = req.Fromip
 
-	fmt.Println("FileCachedEvent - file path.", req.Filepath, len(remoteCachedFiles))
+	fmt.Println("FileCachedEvent - file path.", req.Filepath, req.Fh, len(remoteCachedFiles))
 
 	return
 }
@@ -756,13 +775,13 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 // GetFileData gets the requested byte range for the specified file
 func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse) (err error) {
 
-	fmt.Println("2. GetFileData() - Buffer len: ", len(req.Filedata), req.Filepath, req.Fh)
+	// fmt.Println("2. GetFileData() - Buffer len: ", len(req.Filedata), req.Filepath, req.Fh)
 
 	if req.Filepath == "" {
 		return errors.New("a file path must be specified")
 	}
-	node := nfsfs.getNode(req.Filepath, req.Fh)
 
+	node := nfsfs.getNode(req.Filepath, req.Fh)
 	if node == nil {
 		return errors.New("node reference not found for " + req.Filepath + " FH:" + string(req.Fh))
 	}
@@ -776,7 +795,7 @@ func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse)
 	res.Filedata = req.Filedata
 
 	res.NumbBytes, _ = fetchLocalCacheData(node, req.Offset, req.Endoffset, res.Filedata)
-	fmt.Println("2.1 GetFileData() - Ret data: ", res.NumbBytes)
+	// fmt.Println("2.1 GetFileData() - Ret data: ", res.NumbBytes)
 	return
 }
 

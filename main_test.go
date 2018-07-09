@@ -194,6 +194,48 @@ func TestUpdateLocalCacheNoExtendNodeData(t *testing.T) {
 	}
 }
 
+func TestRemoteCacheFetch(t *testing.T) {
+	var offset, endoffset int64
+	file, fh := "file", uint64(1)
+	buff := make([]byte, 5)
+	node := createTestNode()
+
+	// remoteCachedFiles[file] = "localhost"
+	numbbytes := getRemoteCacheData(file, fh, node, offset, endoffset, buff, mockRPCCall)
+
+	if numbbytes == 0 {
+		t.Error("No data returned. Expected 5 bytes")
+	}
+
+	for i := 0; i < 5; i++ {
+		if buff[i] != byte(i) {
+			t.Error("Invalid data returened from cache -", i, buff[i])
+		}
+	}
+}
+
+func TestRemoteCacheFetchWithNoCacheList(t *testing.T) {
+	// should return immediate as remoteCachedFiles map is empty
+	numbbytes := tryRemoteCache("", 0, nil, 0, 0, nil)
+
+	if numbbytes != 0 {
+		t.Error("Expecting number of bytes to be 0. Got ", numbbytes)
+	}
+}
+
+func TestLocalCacheAfterRemoteCacheFetch(t *testing.T) {
+
+}
+
+func mockRPCCall(method string, args interface{}, reply interface{}) error {
+
+	if resp, ok := reply.(*CachedDataResponse); ok {
+		resp.Filedata = []byte{0, 1, 2, 3, 4}
+		resp.NumbBytes = 5
+	}
+	return nil
+}
+
 func createTestNode() *Node {
 	return &Node{
 		cache:    FileCache{},
