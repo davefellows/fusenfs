@@ -13,7 +13,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/billziss-gh/cgofuse/fuse"
+	"github.com/davefellows/cgofuse/fuse"
 	"github.com/vmware/go-nfs-client/nfs"
 	nfsrpc "github.com/vmware/go-nfs-client/nfs/rpc"
 )
@@ -183,6 +183,9 @@ func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
 	defer fs.synchronize()()
 
 	errc, fh = fs.openNode(path, false)
+	if errc != 0 {
+		fmt.Println("Open() - Error: ", errc)
+	}
 	fmt.Println("Open() path: ", path, fh)
 	return
 }
@@ -196,6 +199,7 @@ func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 
 	node := fs.getNode(path, fh)
 	if nil == node {
+		fmt.Println("Getattr() Error: nil node")
 		return -fuse.ENOENT
 	}
 	*stat = node.stat
@@ -250,6 +254,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	// log.Println("Read() - In")
 
 	if node == nil {
+		fmt.Println("Read() Error: nil node")
 		return -fuse.ENOENT
 	}
 
@@ -260,10 +265,10 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	if endoffset < offset {
 		return 0
 	}
-	// fmt.Println("\n1. Read() - offsets:\t\t\t", offset, endoffset, path)
+	fmt.Println("\n1. Read() - offsets:\t\t\t", offset, endoffset, len(buff), path)
 
 	// 1. See if we have this byte range cached locally in memory
-	numb, extendedCacheItem := fetchLocalCacheData(node, offset, endoffset, buff)
+	numb, newCacheItemRequired := fetchLocalCacheData(node, offset, endoffset, buff)
 
 	if numb > 0 {
 		if len(node.cache.byteRanges) > 1 {
@@ -279,14 +284,13 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 		if len(node.cache.byteRanges) > 1 {
 			go reduceFileCache(node, path)
 		}
-		return numb
+	} else {
+		// log.Println("Read() - Before read NFS")
+		// 3. Otherwise, let's get our file from NFS
+		numb = readFileFromNFS(path, node, buff, offset, endoffset)
 	}
 
-	// log.Println("Read() - Before read NFS")
-	// 3. Otherwise, let's get our file from NFS
-	numb = readFileFromNFS(path, node, buff, offset, endoffset)
-
-	updateLocalCache(!extendedCacheItem, path, node, buff, offset, endoffset)
+	updateLocalCache(newCacheItemRequired, path, node, buff, offset, endoffset)
 
 	node.stat.Atim = fuse.Now()
 	return numb
@@ -304,7 +308,7 @@ func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
 
 // Opendir opens the specified directory/node
 func (fs *Nfsfs) Opendir(path string) (errc int, fh uint64) {
-	// fmt.Println("Opendir() path: ", path)
+	fmt.Println("Opendir() path: ", path)
 	// defer trace(path)(&errc, &fh)
 	defer fs.synchronize()()
 	return fs.openNode(path, true)
@@ -447,7 +451,6 @@ func reduceFileCache(node *Node, filepath string) {
 	if highest-lowest == node.stat.Size {
 		// fmt.Println("reduceFileCache CACHED file", filepath)
 		if len(remoteServers) > 0 {
-			//TODO: Test Ino/FH
 			broadcastCachedFile(remoteServers[0], filepath, node.stat.Ino)
 		}
 	}
@@ -456,9 +459,10 @@ func reduceFileCache(node *Node, filepath string) {
 // fetchLocalCacheData scans the in memory cache for the
 // file and requested byte range. Copies to buff if found.
 func fetchLocalCacheData(node *Node, offset, endoffset int64,
-	buff []byte) (numBytes int, extendCacheItem bool) {
+	buff []byte) (numBytes int, newCacheItemRequired bool) {
 
 	cacheHit := false
+	newCacheItemRequired = true
 	// fmt.Println("fetchLocalCacheData() - ByteRanges: ", len(node.cache.byteRanges), offset, endoffset, len(buff))
 	// fmt.Println("\nRead() - offsets:", endoffset-offset, len(buff), node.stat.Size, path)
 
@@ -473,13 +477,13 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 		if offset >= br.low && offset < br.high {
 			// extend cache
 			br.high = endoffset
-			extendCacheItem = true
+			newCacheItemRequired = false
 		}
 
 		if endoffset < br.high && endoffset > br.low {
 			// extend lower end of cache
 			br.low = offset
-			extendCacheItem = true
+			newCacheItemRequired = false
 		}
 	}
 	node.cache.lock.Unlock()
@@ -502,7 +506,7 @@ func tryRemoteCache(path string, fh uint64,
 		return 0
 	}
 
-	fmt.Println("RemoteCache - ", path, len(buff), endoffset-offset, offset, endoffset)
+	fmt.Println("RemoteCache - ", path, len(buff), offset, endoffset)
 
 	client, err := destConnection(address)
 	if err != nil {
@@ -514,9 +518,10 @@ func tryRemoteCache(path string, fh uint64,
 	return getRemoteCacheData(path, fh, node, offset, endoffset, buff, client.Call)
 }
 
-func getRemoteCacheData(filepath string, fh uint64,
-	node *Node, offset, endoffset int64, buff []byte,
-	rpcCall func(method string, args interface{}, reply interface{}) error) (numb int) {
+type rpcCallFunc func(method string, args interface{}, reply interface{}) error
+
+func getRemoteCacheData(filepath string, fh uint64, node *Node,
+	offset, endoffset int64, buff []byte, rpcCall rpcCallFunc) (numb int) {
 
 	request := &CachedDataRequest{
 		Filepath:  filepath,
@@ -529,7 +534,6 @@ func getRemoteCacheData(filepath string, fh uint64,
 	//TODO: Figure out why response buffer doesn't make to through RPC call
 	// response.Filedata = buff
 
-	//TODO: Mock with function
 	err := rpcCall(getFileDataHandlerName, request, response)
 	if err != nil {
 		fmt.Println("Error calling tryRemoteCache: ", filepath, err.Error())
@@ -608,13 +612,6 @@ func broadcastCachedFile(address, filepath string, fh uint64) {
 	if err != nil {
 		fmt.Println("broadcastCachedFile() - Error calling FileCachedEvent: ", filepath, err.Error())
 	}
-
-	//TODO: Remove - just here for debugging
-	node := nfsfs.getNode(filepath, fh)
-	if node == nil {
-		fmt.Println("broadcastCachedFile() - Nil Node (getNode): ", filepath, fh)
-	}
-
 }
 
 func destConnection(address string) (*rpc.Client, error) {
@@ -764,10 +761,11 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 		return errors.New("a file path must be specified")
 	}
 
-	//TODO: add locking here
+	//TODO: decide  whether locking is required here.
+	// Probably not a big deal as stale reads are fine
 	remoteCachedFiles[req.Filepath] = req.Fromip
 
-	fmt.Println("FileCachedEvent - file path.", req.Filepath, req.Fh, len(remoteCachedFiles))
+	fmt.Println("FileCachedEvent - file:", req.Filepath, req.Fh, len(remoteCachedFiles))
 
 	return
 }
