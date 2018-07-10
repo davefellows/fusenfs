@@ -19,7 +19,6 @@ import (
 )
 
 const (
-	// IsfileCachedHandlerName = "RPCHandler.IsFileCached"
 	fileCachedHandlerName  = "RPCHandler.FileCachedEvent"
 	getFileDataHandlerName = "RPCHandler.GetFileData"
 )
@@ -34,8 +33,6 @@ var (
 
 	nfsfs     *Nfsfs
 	nfstarget *nfs.Target
-
-	// cacheremotes = []string{"localhost"}
 
 	remoteServers     []string
 	remoteCachedFiles map[string]string
@@ -72,12 +69,6 @@ type ByteRange struct {
 	high int64
 }
 
-// // RemoteCachedFile
-// type RemoteCachedFile struct {
-// 	filepath  string
-// 	remoteips []string
-// }
-
 // CacheUpdateRequest to update remote server caches
 type CacheUpdateRequest struct {
 	Fromip   string
@@ -105,11 +96,6 @@ type CachedDataResponse struct {
 	NumbBytes int
 }
 
-// type CacheRef struct {
-// 	address   string
-// 	rpcclient *rpc.Client
-// }
-
 // RPCHandler handler type for our RPC calls
 type RPCHandler struct{}
 
@@ -135,7 +121,7 @@ func main() {
 	defer mount.Close()
 
 	//TODO: Check if needed
-	auth := nfsrpc.NewAuthUnix("dafellnfs-wus", 1000, 1000)
+	auth := nfsrpc.NewAuthUnix("", 1000, 1000)
 
 	nfstarget, err = mount.Mount(*target, auth.Auth())
 	if err != nil {
@@ -144,7 +130,7 @@ func main() {
 	}
 	defer nfstarget.Close()
 
-	nfsfs = newfs() // &Nfsfs{}
+	nfsfs = newfs()
 	host := fuse.NewFileSystemHost(nfsfs)
 	host.Mount(*mntpoint, []string{})
 }
@@ -179,7 +165,6 @@ func newfs() *Nfsfs {
 // Open opens the specified node
 func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
 
-	// defer trace(path, flags)(&errc, &fh)
 	defer fs.synchronize()()
 
 	errc, fh = fs.openNode(path, false)
@@ -194,7 +179,6 @@ func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
 func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 	fmt.Println("Getattr() path: ", path, fh)
 
-	// defer trace(path, fh)(&errc, stat)
 	defer fs.synchronize()()
 
 	node := fs.getNode(path, fh)
@@ -209,7 +193,6 @@ func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 // Getxattr gets the extended file attributes
 func (fs *Nfsfs) Getxattr(path string, name string) (errc int, xattr []byte) {
 
-	// defer trace(path, name)(&errc, &xatr)
 	defer fs.synchronize()()
 
 	_, _, node := fs.lookupNode(path, nil)
@@ -229,12 +212,14 @@ func (fs *Nfsfs) Getxattr(path string, name string) (errc int, xattr []byte) {
 // Truncate truncates the specified file
 func (fs *Nfsfs) Truncate(path string, size int64, fh uint64) (errc int) {
 	fmt.Println("Truncate() path: ", path)
-	// defer trace(path, size, fh)(&errc)
+
 	defer fs.synchronize()()
+
 	node := fs.getNode(path, fh)
 	if nil == node {
 		return -fuse.ENOENT
 	}
+
 	node.data = resize(node.data, size, true)
 	node.stat.Size = size
 	tmsp := fuse.Now()
@@ -246,12 +231,9 @@ func (fs *Nfsfs) Truncate(path string, size int64, fh uint64) (errc int) {
 // Read reads in the specified file
 func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb int) {
 
-	// defer trace(path, buff, ofst, fh)(&n)
 	defer fs.synchronize()()
 
 	node := fs.getNode(path, fh)
-
-	// log.Println("Read() - In")
 
 	if node == nil {
 		fmt.Println("Read() Error: nil node")
@@ -285,7 +267,6 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 			go reduceFileCache(node, path)
 		}
 	} else {
-		// log.Println("Read() - Before read NFS")
 		// 3. Otherwise, let's get our file from NFS
 		numb = readFileFromNFS(path, node, buff, offset, endoffset)
 	}
@@ -298,18 +279,16 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 
 // Release releases the specified file handle
 func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
-	fmt.Println("Release() path: ", path, fh)
-	// defer trace(path, fh)(&errc)
+	// fmt.Println("Release() path: ", path, fh)
+
 	defer fs.synchronize()()
-	// node := fs.getNode(path, fh)
-	// node.allread = true
 	return fs.closeNode(fh)
 }
 
 // Opendir opens the specified directory/node
 func (fs *Nfsfs) Opendir(path string) (errc int, fh uint64) {
-	fmt.Println("Opendir() path: ", path)
-	// defer trace(path)(&errc, &fh)
+	// fmt.Println("Opendir() path: ", path)
+
 	defer fs.synchronize()()
 	return fs.openNode(path, true)
 }
@@ -322,14 +301,12 @@ func (fs *Nfsfs) Readdir(path string,
 
 	// fmt.Println("Readdir() ", path)
 
-	// defer trace(path, fill, ofst, fh)(&errc)
 	defer fs.synchronize()()
 
 	dirs, err := nfstarget.ReadDirPlus(path)
 	if err != nil {
 		fmt.Println("\tReaddir error: ", err.Error())
-		//TODO: return fuse error
-		return 1
+		return -fuse.ENOENT
 	}
 
 	node := fs.openmap[fh]
@@ -364,15 +341,13 @@ func (fs *Nfsfs) Readdir(path string,
 // Releasedir releases the specified directory by closing the node
 func (fs *Nfsfs) Releasedir(path string, fh uint64) (errc int) {
 	// fmt.Println("Releasedir() path: ", path)
-	// defer trace(path, fh)(&errc)
 	defer fs.synchronize()()
 	return fs.closeNode(fh)
 }
 
 // Chflags sets the flags on the specified node
 func (fs *Nfsfs) Chflags(path string, flags uint32) (errc int) {
-	fmt.Println("Chflags() path: ", path)
-	// defer trace(path, flags)(&errc)
+
 	defer fs.synchronize()()
 	_, _, node := fs.lookupNode(path, nil)
 	if nil == node {
@@ -415,7 +390,6 @@ func reduceFileCache(node *Node, filepath string) {
 	})
 
 	for _, br := range node.cache.byteRanges {
-		// fmt.Println(br.low, br.high, lowest, highest)
 		// 1. range extends the previous one above
 		if br.low <= highest && br.high > highest {
 			highest = br.high
@@ -433,16 +407,9 @@ func reduceFileCache(node *Node, filepath string) {
 		highest = max(highest, br.high)
 	}
 
-	// if we've made changes then
+	// if we've made changes then append and update
 	if highest != 0 {
-		// fmt.Println(lowest, highest)
 		newByteRanges = append(newByteRanges, ByteRange{low: lowest, high: highest})
-
-		// fmt.Println("reduceFileCache LEN: ", len(newByteRanges))
-
-		// for i, br := range newByteRanges {
-		// 	fmt.Println("Cache: ", i, br.low, br.high)
-		// }
 
 		node.cache.lock.Lock()
 		node.cache.byteRanges = newByteRanges
@@ -469,7 +436,6 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 	node.cache.lock.Lock()
 	for _, br := range node.cache.byteRanges {
 		if offset >= br.low && endoffset <= br.high {
-			// fmt.Println("fetchLocalCacheData() - Cache hit!")
 			cacheHit = true
 			break
 		}
@@ -506,7 +472,7 @@ func tryRemoteCache(path string, fh uint64,
 		return 0
 	}
 
-	fmt.Println("RemoteCache - ", path, len(buff), offset, endoffset)
+	// fmt.Println("RemoteCache - ", path, len(buff), offset, endoffset)
 
 	client, err := destConnection(address)
 	if err != nil {
@@ -523,15 +489,17 @@ type rpcCallFunc func(method string, args interface{}, reply interface{}) error
 func getRemoteCacheData(filepath string, fh uint64, node *Node,
 	offset, endoffset int64, buff []byte, rpcCall rpcCallFunc) (numb int) {
 
+	// HACK: Filedata/buff shouldn't be needed here but
+	// buffer comes through empty when added to response object
 	request := &CachedDataRequest{
 		Filepath:  filepath,
 		Fh:        fh,
 		Offset:    offset,
 		Endoffset: endoffset,
-		Filedata:  buff, // HACK: this shouldn't be needed but response buffer comes through empty
+		Filedata:  buff,
 	}
 	response := new(CachedDataResponse)
-	//TODO: Figure out why response buffer doesn't make to through RPC call
+	//TODO: Figure out why response buffer doesn't make it to through RPC call
 	// response.Filedata = buff
 
 	err := rpcCall(getFileDataHandlerName, request, response)
@@ -562,7 +530,6 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 		return 0
 	}
 
-	// maxbytes := 32768
 	newoffset := offset
 	for {
 		_, err = file.Seek(newoffset, io.SeekStart)
@@ -579,7 +546,7 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 		}
 
 		if err != nil {
-			//TODO: Error handling
+			//TODO: Error handling - what should we do here?
 			log.Fatal("Read - Error: ", err.Error())
 			return 0
 		}
@@ -661,6 +628,7 @@ func (fs *Nfsfs) openNode(path string, dir bool) (errc int, fh uint64) {
 func (fs *Nfsfs) closeNode(fh uint64) int {
 	node := fs.openmap[fh]
 	node.opencnt--
+	// Don't want to remove the node from our map
 	// if 0 == node.opencnt {
 	// 	delete(fs.openmap, node.stat.Ino)
 	// }
@@ -672,8 +640,6 @@ func (fs *Nfsfs) lookupNode(path string, ancestor *Node) (parent *Node, name str
 	parent = fs.root
 	name = ""
 	node = fs.root
-
-	// fmt.Println("lookupNode: Path: ", path)
 
 	for _, c := range strings.Split(path, "/") {
 		if c != "" {
@@ -715,7 +681,6 @@ func newNode(dev uint64, ino uint64, mode uint32, uid uint32, gid uint32) *Node 
 		FileCache{byteRanges: []ByteRange{}},
 	}
 
-	// fmt.Println("newNode() Dir: ", node.stat.Mode&fuse.S_IFMT, ":", fuse.S_IFDIR, ":", fuse.S_IFMT)
 	if node.stat.Mode&fuse.S_IFMT == fuse.S_IFDIR {
 		node.children = map[string]*Node{}
 	}
@@ -805,46 +770,3 @@ func max(a, b int64) int64 {
 	}
 	return b
 }
-
-// func checkRemoteCaches(filepath string, fh uint64) *CacheRef {
-// 	// var wg sync.WaitGroup
-// 	hasfilechan := make(chan *CacheRef)
-
-// 	for _, remote := range cacheremotes {
-// 		// wg.Add()
-// 		go queryRemoteCache(remote, filepath, fh, hasfilechan)
-// 	}
-
-// 	for {
-// 		select {
-// 		case <-time.After(time.Second * 1):
-// 			fmt.Println("checkRemoteCaches timedout")
-// 			return nil
-// 		case cacheRef := <-hasfilechan:
-// 			fmt.Println("checkRemoteCaches got value")
-// 			return cacheRef
-// 		}
-// 	}
-// }
-
-// func queryRemoteCache(address, filepath string, fh uint64, hasfilechan chan<- *CacheRef) {
-
-// 	client, err := destConnection(address)
-// 	if err != nil {
-// 		fmt.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
-// 		os.Exit(2)
-// 	}
-// 	defer client.Close()
-
-// 	request := &CacheUpdateRequest{Filepath: filepath, Fh: fh}
-// 	response := new(CacheUpdateResponse)
-// 	client.Call(IsfileCachedHandlerName, request, response)
-
-// 	// fmt.Println("Response received - IsCached: ", response.IsCached)
-
-// 	if response.IsCached {
-// 		hasfilechan <- &CacheRef{address: address, rpcclient: client}
-// 	} else {
-// 		hasfilechan <- nil
-// 	}
-// }
