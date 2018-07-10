@@ -544,7 +544,7 @@ func getRemoteCacheData(filepath string, fh uint64, node *Node,
 		copy(buff, response.Filedata)
 		node.cache.lock.Lock()
 		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
-		node.cache.lock.Unlock
+		node.cache.lock.Unlock()
 	} else {
 		fmt.Println("4.2 RemoteCache NO DATA RECEIVED.", filepath)
 	}
