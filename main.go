@@ -265,7 +265,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	if endoffset < offset {
 		return 0
 	}
-	fmt.Println("\n1. Read() - offsets:\t\t\t", offset, endoffset, len(buff), path)
+	// fmt.Println("\n1. Read() - offsets:\t\t\t", offset, endoffset, len(buff), path)
 
 	// 1. See if we have this byte range cached locally in memory
 	numb, newCacheItemRequired := fetchLocalCacheData(node, offset, endoffset, buff)
@@ -542,7 +542,9 @@ func getRemoteCacheData(filepath string, fh uint64, node *Node,
 	if response.NumbBytes > 0 {
 		// fmt.Println("4.1 RemoteCache GOT DATA.", filepath, response.NumbBytes)
 		copy(buff, response.Filedata)
+		node.cache.lock.Lock()
 		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
+		node.cache.lock.Unlock
 	} else {
 		fmt.Println("4.2 RemoteCache NO DATA RECEIVED.", filepath)
 	}
