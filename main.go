@@ -24,12 +24,12 @@ const (
 )
 
 var (
-	nfshost   = flag.String("NFS-server", "", "The hostname/IP for the NFS Server.")
+	nfshost   = flag.String("NFS-server", "localhost", "The hostname/IP for the NFS Server.")
 	target    = flag.String("NFS-target", "/C/temp", "The target/path on the NFS Server.")
 	mntpoint  = flag.String("mount-point", "", "Where to mount the file system.")
 	thisip    = flag.String("ThisIP", "", "The IP address of this server for cache requests.")
 	remoteips = flag.String("RemoteIPs", "", "Comma separate list of IPs for remote servers.")
-	rpcPort   = flag.String("RemotePort", "5555", "Port to use for connection with remote servers.")
+	rpcPort   = flag.String("RemotePort", "5556", "Port to use for connection with remote servers.")
 
 	nfsfs     *Nfsfs
 	nfstarget *nfs.Target
@@ -44,7 +44,7 @@ type Nfsfs struct {
 	lock    sync.Mutex
 	ino     uint64
 	root    *Node
-	openmap map[uint64]*Node
+	openmap map[string]*Node
 }
 
 // Node represents a file or folder
@@ -113,10 +113,25 @@ func main() {
 		go setupRPCListener(*rpcPort)
 	}
 
+	err := connectNFS()
+	if err != nil {
+		os.Exit(1)
+	}
+
+	fmt.Println("Connected to NFS", *nfshost, *target)
+
+	defer nfstarget.Close()
+
+	nfsfs = newfs()
+	host := fuse.NewFileSystemHost(nfsfs)
+	host.Mount(*mntpoint, []string{})
+}
+
+func connectNFS() error {
 	mount, err := nfs.DialMount(*nfshost)
 	if err != nil {
-		log.Fatalf("unable to dial MOUNT service: %v", err)
-		return
+		fmt.Println("unable to dial MOUNT service:", err.Error())
+		return err
 	}
 	defer mount.Close()
 
@@ -125,14 +140,9 @@ func main() {
 
 	nfstarget, err = mount.Mount(*target, auth.Auth())
 	if err != nil {
-		log.Fatalf("unable to mount volume: %v", err)
-		return
+		fmt.Println("unable to mount volume:", err.Error())
 	}
-	defer nfstarget.Close()
-
-	nfsfs = newfs()
-	host := fuse.NewFileSystemHost(nfsfs)
-	host.Mount(*mntpoint, []string{})
+	return err
 }
 
 func setupRPCListener(port string) {
@@ -158,12 +168,13 @@ func newfs() *Nfsfs {
 	defer fs.synchronize()()
 	fs.ino++
 	fs.root = newNode(0, fs.ino, fuse.S_IFDIR|00777, 0, 0)
-	fs.openmap = map[uint64]*Node{}
+	fs.openmap = map[string]*Node{}
 	return &fs
 }
 
 // Open opens the specified node
 func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
+	// fmt.Println("Open() path: ", path)
 
 	defer fs.synchronize()()
 
@@ -177,15 +188,16 @@ func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
 
 // Getattr gets the attributes for a specified node
 func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
-	fmt.Println("Getattr() path: ", path, fh)
+	// fmt.Println("Getattr() path: ", path, fh)
 
 	defer fs.synchronize()()
 
 	node := fs.getNode(path, fh)
 	if nil == node {
-		fmt.Println("Getattr() Error: nil node")
+		// fmt.Println("Getattr() Error: nil node")
 		return -fuse.ENOENT
 	}
+
 	*stat = node.stat
 	return 0
 }
@@ -282,7 +294,7 @@ func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
 	// fmt.Println("Release() path: ", path, fh)
 
 	defer fs.synchronize()()
-	return fs.closeNode(fh)
+	return fs.closeNode(path)
 }
 
 // Opendir opens the specified directory/node
@@ -298,25 +310,44 @@ func (fs *Nfsfs) Readdir(path string,
 	fill func(name string, stat *fuse.Stat_t, ofst int64) bool,
 	ofst int64,
 	fh uint64) (errc int) {
-
 	// fmt.Println("Readdir() ", path)
 
 	defer fs.synchronize()()
 
+	return fs.populateDir(path, fill)
+}
+
+func (fs *Nfsfs) populateDir(path string,
+	fill func(name string, stat *fuse.Stat_t, ofst int64) bool) (errc int) {
+
 	dirs, err := nfstarget.ReadDirPlus(path)
 	if err != nil {
-		fmt.Println("\tReaddir error: ", err.Error())
-		return -fuse.ENOENT
+		fmt.Println("Readdir error: ReadDirPlus()", err.Error())
+		// try reconnecting
+		err := connectNFS()
+		if err != nil {
+			fmt.Println("Readdir error: ConnectNFS()", err.Error())
+			return -fuse.ENOENT
+		}
+
+		dirs, err = nfstarget.ReadDirPlus(path)
+		if err != nil {
+			fmt.Println("Readdir error: ReadDirPlus()", err.Error())
+			return -fuse.ENOENT
+		}
 	}
 
-	node := fs.openmap[fh]
+	node := fs.openmap[path]
 
 	if node == nil {
 		node = fs.root
 		fmt.Println("\tSetting node to fs.root")
 	}
 
+	fmt.Println("populateDir() - dirs:", len(dirs))
+
 	for _, dir := range dirs {
+		// fmt.Println("populateDir() - dir:", dir.FileName)
 		fs.ino++
 		mode := uint32(dir.Attr.Attr.Mode())
 		if dir.Attr.Attr.IsDir() {
@@ -328,7 +359,9 @@ func (fs *Nfsfs) Readdir(path string,
 		child := newNode(0, fs.ino, mode, dir.Attr.Attr.UID, dir.Attr.Attr.GID)
 		child.stat.Size = dir.Attr.Attr.Size()
 
-		fill(dir.FileName, &child.stat, 0)
+		if fill != nil {
+			fill(dir.FileName, &child.stat, 0)
+		}
 
 		if node.children[dir.FileName] == nil {
 			node.children[dir.FileName] = child
@@ -342,7 +375,7 @@ func (fs *Nfsfs) Readdir(path string,
 func (fs *Nfsfs) Releasedir(path string, fh uint64) (errc int) {
 	// fmt.Println("Releasedir() path: ", path)
 	defer fs.synchronize()()
-	return fs.closeNode(fh)
+	return fs.closeNode(path)
 }
 
 // Chflags sets the flags on the specified node
@@ -385,9 +418,11 @@ func reduceFileCache(node *Node, filepath string) {
 	var newByteRanges []ByteRange
 	var lowest, highest int64
 
+	node.cache.lock.Lock()
 	sort.Slice(node.cache.byteRanges, func(i, j int) bool {
 		return node.cache.byteRanges[i].low < node.cache.byteRanges[j].low
 	})
+	node.cache.lock.Unlock()
 
 	for _, br := range node.cache.byteRanges {
 		// 1. range extends the previous one above
@@ -599,7 +634,7 @@ func (fs *Nfsfs) getNode(path string, fh uint64) *Node {
 		return node
 	}
 
-	return fs.openmap[fh]
+	return fs.openmap[path]
 }
 
 func (fs *Nfsfs) openNode(path string, dir bool) (errc int, fh uint64) {
@@ -620,13 +655,13 @@ func (fs *Nfsfs) openNode(path string, dir bool) (errc int, fh uint64) {
 
 	node.opencnt++
 	if node.opencnt == 1 {
-		fs.openmap[node.stat.Ino] = node
+		fs.openmap[path] = node
 	}
 	return 0, node.stat.Ino
 }
 
-func (fs *Nfsfs) closeNode(fh uint64) int {
-	node := fs.openmap[fh]
+func (fs *Nfsfs) closeNode(path string) int {
+	node := fs.openmap[path]
 	node.opencnt--
 	// Don't want to remove the node from our map
 	// if 0 == node.opencnt {
@@ -648,6 +683,13 @@ func (fs *Nfsfs) lookupNode(path string, ancestor *Node) (parent *Node, name str
 			}
 			parent, name = node, c
 			node = node.children[c]
+
+			if node == nil {
+				fmt.Println("lookupNode() node nil, calling populateDir()", path, c)
+				_ = fs.populateDir("/", nil)
+				node = parent.children[c]
+			}
+
 			if node == ancestor && ancestor != nil {
 				name = "" // special case loop condition
 				return

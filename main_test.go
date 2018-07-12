@@ -200,7 +200,6 @@ func TestRemoteCacheFetch(t *testing.T) {
 	buff := make([]byte, 5)
 	node := createTestNode()
 
-	// remoteCachedFiles[file] = "localhost"
 	numbbytes := getRemoteCacheData(file, fh, node, offset, endoffset, buff, mockRPCCall)
 
 	if numbbytes == 0 {
@@ -215,7 +214,7 @@ func TestRemoteCacheFetch(t *testing.T) {
 }
 
 func TestRemoteCacheFetchWithNoCacheList(t *testing.T) {
-	// should return immediate as remoteCachedFiles map is empty
+	// should return immediately as remoteCachedFiles map is empty
 	numbbytes := tryRemoteCache("", 0, nil, 0, 0, nil)
 
 	if numbbytes != 0 {
