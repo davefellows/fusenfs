@@ -102,7 +102,7 @@ func runfuseNFS(path string) {
 	err := fusecmd.Run()
 	if err != nil {
 		if strings.Index(err.Error(), "file does not exist") > 0 || strings.Index(err.Error(), "file not found") > 0 {
-			fmt.Println("Run 'go install' in fusenfs directory before running integration tests. fusenfs.exe must end up in PATH (normally from %GOPATH%\\bin)")
+			fmt.Println("Run 'go install' in fusenfs directory before running integration tests. fusenfs.exe must end up in PATH (normally from $GOPATH\\bin)")
 		}
 		panic(err)
 	}

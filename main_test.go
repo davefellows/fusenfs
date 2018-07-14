@@ -232,10 +232,41 @@ func TestMemoryLimit(t *testing.T) {
 	nodes := []*Node{nodeThatShouldBeRemoved, createTestNode(), createTestNode()}
 
 	cacheNodes := []CachedNode{
-		CachedNode{node: nodes[0], timeCached: time.Now()},
-		CachedNode{node: nodes[1], timeCached: time.Now()},
-		CachedNode{node: nodes[2], timeCached: time.Now()},
+		CachedNode{node: nodes[0], lastAccessed: time.Now()},
+		CachedNode{node: nodes[1], lastAccessed: time.Now()},
+		CachedNode{node: nodes[2], lastAccessed: time.Now()},
 	}
+
+	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
+
+	cachedNodes = cacheNodes
+	findAndRemoveEarliestCacheItems(10)
+
+	if len(nodeThatShouldBeRemoved.data) > 0 {
+		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.data))
+	}
+
+	if len(nodeThatShouldBeRemoved.cache.byteRanges) > 0 {
+		t.Error("Expecting node's byteRanges to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.cache.byteRanges))
+	}
+
+}
+
+func TestMemoryLimitWithModifiedNode(t *testing.T) {
+	nodeThatShouldBeRemoved := createTestNode()
+	nodes := []*Node{createTestNode(), createTestNode(), nodeThatShouldBeRemoved}
+
+	cacheNodes := []CachedNode{
+		CachedNode{node: nodes[0], lastAccessed: time.Now()},
+		CachedNode{node: nodes[1], lastAccessed: time.Now()},
+		CachedNode{node: nodes[2], lastAccessed: time.Now()},
+	}
+
+	// Update times of first two nodes.
+	// 3rd node should now be least-recently accessed and removed
+	nodes[0].cache.cachedNode.lastAccessed = time.Now()
+	nodes[1].cache.cachedNode.lastAccessed = time.Now()
 
 	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
 	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}

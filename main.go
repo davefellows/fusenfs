@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"flag"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -31,7 +30,7 @@ var (
 	mntpoint  = flag.String("mount-point", "", "Where to mount the file system.")
 	thisip    = flag.String("thisip", "", "The IP address of this server for cache requests.")
 	remoteips = flag.String("remoteips", "", "Comma separate list of IPs for remote servers.")
-	rpcPort   = flag.String("remoteport", "5556", "Port to use for connection with remote servers.")
+	rpcPort   = flag.String("remoteport", "5555", "Port to use for connection with remote servers.")
 	memLimit  = flag.Int("memlimitmb", 0, "Optionally limit how much memory can be used. Recommended, otherwise process will keep caching until something blows up.")
 
 	nfsfs       *Nfsfs
@@ -60,19 +59,19 @@ type Node struct {
 	data     []byte
 	opencnt  int
 	cache    FileCache
-	// when     time.Time
 }
 
 // FileCache represents in memory cached byte ranges
 type FileCache struct {
 	byteRanges []ByteRange
+	cachedNode CachedNode
 	lock       sync.Mutex
 }
 
 // CachedNode represents when a node was cached. Used for cache-eviction
 type CachedNode struct {
-	node       *Node
-	timeCached time.Time
+	node         *Node
+	lastAccessed time.Time
 }
 
 // ByteRange for a chunk of cached data
@@ -113,13 +112,20 @@ type RPCHandler struct{}
 
 func main() {
 	flag.Parse()
-
-	log.Println("Remote host:", *nfshost)
+	log.SetOutput(os.Stdout)
 
 	remoteCachedFiles = make(map[string]string)
-	remoteServers = strings.Split(*remoteips, ",")
 
-	fmt.Println("RemoteServers:", *remoteips, remoteServers)
+	if len(*remoteips) > 0 {
+		remoteServers = strings.Split(*remoteips, ",")
+	}
+
+	log.Println("NFS host:", *nfshost)
+	log.Println("NFS target:", *target)
+	log.Println("Mount point:", *mntpoint)
+	log.Println("Remote servers:", len(remoteServers), remoteServers)
+	log.Println("Remote port:", *rpcPort)
+	log.Println("Memory limit:", *memLimit)
 
 	if len(remoteServers) > 0 {
 		go setupRPCListener(*rpcPort)
@@ -129,42 +135,19 @@ func main() {
 	if err != nil {
 		os.Exit(1)
 	}
-
-	fmt.Println("Connected to NFS", *nfshost, *target)
-
 	defer nfstarget.Close()
-
-	printMemUsage()
+	log.Println("Connected to NFS", *nfshost, *target)
 
 	nfsfs = newfs()
 	host := fuse.NewFileSystemHost(nfsfs)
 	host.Mount(*mntpoint, []string{})
-}
-
-func getMemoryUsedMB() int {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return int(m.Alloc / 1024 / 1024)
-}
-
-func printMemUsage() {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
-	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
-	fmt.Printf("\tTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
-	fmt.Printf("\tSys = %v MiB", bToMb(m.Sys))
-	fmt.Printf("\tNumGC = %v\n", m.NumGC)
-}
-
-func bToMb(b uint64) uint64 {
-	return b / 1024 / 1024
+	defer host.Unmount()
 }
 
 func connectNFS() error {
 	mount, err := nfs.DialMount(*nfshost)
 	if err != nil {
-		fmt.Println("unable to dial MOUNT service:", err.Error())
+		log.Println("NFS: unable to dial MOUNT service:", err.Error())
 		return err
 	}
 	defer mount.Close()
@@ -174,7 +157,7 @@ func connectNFS() error {
 
 	nfstarget, err = mount.Mount(*target, auth.Auth())
 	if err != nil {
-		fmt.Println("unable to mount volume:", err.Error())
+		log.Println("NFS: unable to mount volume:", err.Error())
 	}
 	return err
 }
@@ -185,7 +168,6 @@ func setupRPCListener(port string) {
 		log.Fatalf("Error setting up RPC listener. %v", err)
 		return
 	}
-
 	defer listener.Close()
 
 	err = rpc.Register(new(RPCHandler))
@@ -193,7 +175,6 @@ func setupRPCListener(port string) {
 		log.Fatalf("Error registering RPC handler. %v", err)
 		return
 	}
-
 	rpc.Accept(listener)
 }
 
@@ -208,27 +189,26 @@ func newfs() *Nfsfs {
 
 // Open opens the specified node
 func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
-	// fmt.Println("Open() path: ", path)
+	// log.Println("Open() path: ", path)
 
 	defer fs.synchronize()()
 
 	errc, fh = fs.openNode(path, false)
 	if errc != 0 {
-		fmt.Println("Open() - Error: ", errc)
+		log.Println("Open() - Error: ", errc)
 	}
-	fmt.Println("Open() path: ", path, fh)
 	return
 }
 
 // Getattr gets the attributes for a specified node
 func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
-	// fmt.Println("Getattr() path: ", path, fh)
+	// log.Println("Getattr() path: ", path, fh)
 
 	defer fs.synchronize()()
 
 	node := fs.getNode(path, fh)
 	if nil == node {
-		// fmt.Println("Getattr() Error: nil node")
+		// log.Println("Getattr() Error: nil node")
 		return -fuse.ENOENT
 	}
 
@@ -257,7 +237,7 @@ func (fs *Nfsfs) Getxattr(path string, name string) (errc int, xattr []byte) {
 
 // Truncate truncates the specified file
 func (fs *Nfsfs) Truncate(path string, size int64, fh uint64) (errc int) {
-	fmt.Println("Truncate() path: ", path)
+	log.Println("Truncate() path: ", path)
 
 	defer fs.synchronize()()
 
@@ -282,7 +262,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	node := fs.getNode(path, fh)
 
 	if node == nil {
-		fmt.Println("Read() Error: nil node")
+		log.Println("Read() Error: nil node")
 		return -fuse.ENOENT
 	}
 
@@ -293,7 +273,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	if endoffset < offset {
 		return 0
 	}
-	fmt.Println("1. Read() - offsets:\t\t\t", offset, endoffset, len(buff), path)
+	// log.Println("1. Read() - offsets:\t\t\t", offset, endoffset, len(buff), path)
 
 	// 1. See if we have this byte range cached locally in memory
 	numb, newCacheItemRequired := fetchLocalCacheData(node, offset, endoffset, buff)
@@ -325,7 +305,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 
 // Release releases the specified file handle
 func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
-	// fmt.Println("Release() path: ", path, fh)
+	// log.Println("Release() path: ", path, fh)
 
 	defer fs.synchronize()()
 	return fs.closeNode(path)
@@ -333,7 +313,7 @@ func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
 
 // Opendir opens the specified directory/node
 func (fs *Nfsfs) Opendir(path string) (errc int, fh uint64) {
-	// fmt.Println("Opendir() path: ", path)
+	// log.Println("Opendir() path: ", path)
 
 	defer fs.synchronize()()
 	return fs.openNode(path, true)
@@ -344,7 +324,7 @@ func (fs *Nfsfs) Readdir(path string,
 	fill func(name string, stat *fuse.Stat_t, ofst int64) bool,
 	ofst int64,
 	fh uint64) (errc int) {
-	// fmt.Println("Readdir() ", path)
+	// log.Println("Readdir() ", path)
 
 	defer fs.synchronize()()
 
@@ -356,17 +336,17 @@ func (fs *Nfsfs) populateDir(path string,
 
 	dirs, err := nfstarget.ReadDirPlus(path)
 	if err != nil {
-		fmt.Println("Readdir error: ReadDirPlus()", err.Error())
+		// log.Println("Readdir error: ReadDirPlus()", err.Error())
 		// try reconnecting
 		err := connectNFS()
 		if err != nil {
-			fmt.Println("Readdir error: ConnectNFS()", err.Error())
+			log.Println("Readdir error: ConnectNFS()", err.Error())
 			return -fuse.ENOENT
 		}
 
 		dirs, err = nfstarget.ReadDirPlus(path)
 		if err != nil {
-			fmt.Println("Readdir error: ReadDirPlus()", err.Error())
+			log.Println("Readdir error: ReadDirPlus()", err.Error())
 			return -fuse.ENOENT
 		}
 	}
@@ -375,13 +355,9 @@ func (fs *Nfsfs) populateDir(path string,
 
 	if node == nil {
 		node = fs.root
-		fmt.Println("\tSetting node to fs.root")
 	}
 
-	fmt.Println("populateDir() - dirs:", len(dirs))
-
 	for _, dir := range dirs {
-		// fmt.Println("populateDir() - dir:", dir.FileName)
 		fs.ino++
 		mode := uint32(dir.Attr.Attr.Mode())
 		if dir.Attr.Attr.IsDir() {
@@ -407,7 +383,7 @@ func (fs *Nfsfs) populateDir(path string,
 
 // Releasedir releases the specified directory by closing the node
 func (fs *Nfsfs) Releasedir(path string, fh uint64) (errc int) {
-	// fmt.Println("Releasedir() path: ", path)
+	// log.Println("Releasedir() path: ", path)
 	defer fs.synchronize()()
 	return fs.closeNode(path)
 }
@@ -431,9 +407,13 @@ func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff [
 	if newByteRangeRequired {
 		if len(node.cache.byteRanges) == 0 {
 			// If first byteRange then add to list of cached items by time
+			node.cache.cachedNode = CachedNode{node: node, lastAccessed: time.Now()}
 			cachelock.Lock()
-			cachedNodes = append(cachedNodes, CachedNode{node: node, timeCached: time.Now()})
+			cachedNodes = append(cachedNodes, node.cache.cachedNode)
 			cachelock.Unlock()
+		} else {
+			// Update last access time so we evict items with the oldest previous access
+			node.cache.cachedNode.lastAccessed = time.Now()
 		}
 		node.cache.lock.Lock()
 		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
@@ -453,8 +433,7 @@ func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff [
 	if *memLimit != 0 {
 		memUsedMB := getMemoryUsedMB()
 		if memUsedMB > *memLimit {
-			fmt.Println("Memory Used MB:", memUsedMB, *memLimit)
-			printMemUsage()
+			log.Println("Memory Used MB:", memUsedMB, *memLimit)
 			// remove oldest item from cache
 			findAndRemoveEarliestCacheItems(memUsedMB - *memLimit)
 		}
@@ -471,10 +450,10 @@ func findAndRemoveEarliestCacheItems(memToFreeMB int) {
 
 	cachelock.Lock()
 	sort.Slice(cachedNodes, func(i, j int) bool {
-		return cachedNodes[i].timeCached.Before(cachedNodes[j].timeCached)
+		return cachedNodes[i].lastAccessed.Before(cachedNodes[j].lastAccessed)
 	})
 
-	fmt.Println("CachedItems - Before:", len(cachedNodes))
+	log.Println("CachedItems - Before:", len(cachedNodes))
 
 	freedMem := 0
 	count := 0
@@ -493,13 +472,11 @@ func findAndRemoveEarliestCacheItems(memToFreeMB int) {
 	}
 
 	cachedNodes = cachedNodes[count:]
-	fmt.Println("CachedItems - After:", len(cachedNodes), count)
+	log.Println("CachedItems - After:", len(cachedNodes), count)
 	cachelock.Unlock()
 
 	// Call GC
 	runtime.GC()
-	printMemUsage()
-
 }
 
 // reduceFileCache merges byte ranges where possible.
@@ -542,7 +519,7 @@ func reduceFileCache(node *Node, filepath string) {
 		node.cache.lock.Unlock()
 	}
 	if highest-lowest == node.stat.Size {
-		// fmt.Println("reduceFileCache CACHED file", filepath)
+		// log.Println("reduceFileCache CACHED file", filepath)
 		if len(remoteServers) > 0 {
 			broadcastCachedFile(remoteServers[0], filepath, node.stat.Ino)
 		}
@@ -556,8 +533,8 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 
 	cacheHit := false
 	newCacheItemRequired = true
-	// fmt.Println("fetchLocalCacheData() - ByteRanges: ", len(node.cache.byteRanges), offset, endoffset, len(buff))
-	// fmt.Println("\nRead() - offsets:", endoffset-offset, len(buff), node.stat.Size, path)
+	// log.Println("fetchLocalCacheData() - ByteRanges: ", len(node.cache.byteRanges), offset, endoffset, len(buff))
+	// log.Println("\nRead() - offsets:", endoffset-offset, len(buff), node.stat.Size, path)
 
 	node.cache.lock.Lock()
 	for _, br := range node.cache.byteRanges {
@@ -581,7 +558,7 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 	node.cache.lock.Unlock()
 
 	if cacheHit {
-		fmt.Println("fetchLocalCacheData() - Cache Hit!", offset, endoffset, len(buff))
+		// log.Println("fetchLocalCacheData() - Cache Hit!", offset, endoffset, len(buff))
 		copy(buff, node.data[offset:endoffset])
 		numBytes = int(endoffset - offset)
 		// TODO: update last access time in cache
@@ -599,11 +576,11 @@ func tryRemoteCache(path string, fh uint64,
 		return 0
 	}
 
-	// fmt.Println("RemoteCache - ", path, len(buff), offset, endoffset)
+	// log.Println("RemoteCache - ", path, len(buff), offset, endoffset)
 
 	client, err := destConnection(address)
 	if err != nil {
-		fmt.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
+		log.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
 		return 0
 	}
 	defer client.Close()
@@ -631,17 +608,17 @@ func getRemoteCacheData(filepath string, fh uint64, node *Node,
 
 	err := rpcCall(getFileDataHandlerName, request, response)
 	if err != nil {
-		fmt.Println("Error calling tryRemoteCache: ", filepath, err.Error())
+		log.Println("Error calling tryRemoteCache: ", filepath, err.Error())
 	}
 
 	if response.NumbBytes > 0 {
-		// fmt.Println("4.1 RemoteCache GOT DATA.", filepath, response.NumbBytes)
+		// log.Println("4.1 RemoteCache GOT DATA.", filepath, response.NumbBytes)
 		copy(buff, response.Filedata)
 		node.cache.lock.Lock()
 		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
 		node.cache.lock.Unlock()
 	} else {
-		fmt.Println("4.2 RemoteCache NO DATA RECEIVED.", filepath)
+		log.Println("4.2 RemoteCache NO DATA RECEIVED.", filepath)
 	}
 	return response.NumbBytes
 
@@ -692,11 +669,11 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 // that a file has been cached in memory
 func broadcastCachedFile(address, filepath string, fh uint64) {
 
-	fmt.Println("broadcastCachedFile() - Address:", address, filepath, fh)
+	log.Println("broadcastCachedFile() - Address:", address, filepath, fh)
 
 	client, err := destConnection(address)
 	if err != nil {
-		fmt.Println("broadcastCachedFile() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
+		log.Println("broadcastCachedFile() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
 		os.Exit(2)
 	}
 	defer client.Close()
@@ -706,7 +683,7 @@ func broadcastCachedFile(address, filepath string, fh uint64) {
 	err = client.Call(fileCachedHandlerName, request, response)
 
 	if err != nil {
-		fmt.Println("broadcastCachedFile() - Error calling FileCachedEvent: ", filepath, err.Error())
+		log.Println("broadcastCachedFile() - Error calling FileCachedEvent: ", filepath, err.Error())
 	}
 }
 
@@ -777,7 +754,7 @@ func (fs *Nfsfs) lookupNode(path string, ancestor *Node) (parent *Node, name str
 			node = node.children[c]
 
 			if node == nil {
-				fmt.Println("lookupNode() node nil, calling populateDir()", path, c)
+				// log.Println("lookupNode() node nil, calling populateDir()", path, c)
 				_ = fs.populateDir("/", nil)
 				node = parent.children[c]
 			}
@@ -866,7 +843,7 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 	// Probably not a big deal as stale reads are fine
 	remoteCachedFiles[req.Filepath] = req.Fromip
 
-	fmt.Println("FileCachedEvent - file:", req.Filepath, req.Fh, len(remoteCachedFiles))
+	log.Println("FileCachedEvent - file:", req.Filepath, req.Fh, len(remoteCachedFiles))
 
 	return
 }
@@ -874,7 +851,7 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 // GetFileData gets the requested byte range for the specified file
 func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse) (err error) {
 
-	// fmt.Println("2. GetFileData() - Buffer len: ", len(req.Filedata), req.Filepath, req.Fh)
+	// log.Println("2. GetFileData() - Buffer len: ", len(req.Filedata), req.Filepath, req.Fh)
 
 	if req.Filepath == "" {
 		return errors.New("a file path must be specified")
@@ -894,8 +871,18 @@ func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse)
 	res.Filedata = req.Filedata
 
 	res.NumbBytes, _ = fetchLocalCacheData(node, req.Offset, req.Endoffset, res.Filedata)
-	// fmt.Println("2.1 GetFileData() - Ret data: ", res.NumbBytes)
+	// log.Println("2.1 GetFileData() - Ret data: ", res.NumbBytes)
 	return
+}
+
+func getMemoryUsedMB() int {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int(m.Alloc / 1024 / 1024)
+}
+
+func bToMb(b uint64) uint64 {
+	return b / 1024 / 1024
 }
 
 func max(a, b int64) int64 {
