@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 func TestCanFetchFromLocalCache(t *testing.T) {
@@ -223,6 +224,32 @@ func TestRemoteCacheFetchWithNoCacheList(t *testing.T) {
 }
 
 func TestLocalCacheAfterRemoteCacheFetch(t *testing.T) {
+	//TODO: TestLocalCacheAfterRemoteCacheFetch
+}
+
+func TestMemoryLimit(t *testing.T) {
+	nodeThatShouldBeRemoved := createTestNode()
+	nodes := []*Node{nodeThatShouldBeRemoved, createTestNode(), createTestNode()}
+
+	cacheNodes := []CachedNode{
+		CachedNode{node: nodes[0], timeCached: time.Now()},
+		CachedNode{node: nodes[1], timeCached: time.Now()},
+		CachedNode{node: nodes[2], timeCached: time.Now()},
+	}
+
+	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
+
+	cachedNodes = cacheNodes
+	findAndRemoveEarliestCacheItems(10)
+
+	if len(nodeThatShouldBeRemoved.data) > 0 {
+		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.data))
+	}
+
+	if len(nodeThatShouldBeRemoved.cache.byteRanges) > 0 {
+		t.Error("Expecting node's byteRanges to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.cache.byteRanges))
+	}
 
 }
 

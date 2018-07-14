@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
-	"github.com/davefellows/cgofuse/fuse"
+	"github.com/billziss-gh/cgofuse/fuse"
 	"github.com/vmware/go-nfs-client/nfs"
 	nfsrpc "github.com/vmware/go-nfs-client/nfs/rpc"
 )
@@ -24,15 +26,18 @@ const (
 )
 
 var (
-	nfshost   = flag.String("NFS-server", "localhost", "The hostname/IP for the NFS Server.")
-	target    = flag.String("NFS-target", "/C/temp", "The target/path on the NFS Server.")
+	nfshost   = flag.String("nfs-server", "localhost", "The hostname/IP for the NFS Server.")
+	target    = flag.String("nfs-target", "/C/temp", "The target/path on the NFS Server.")
 	mntpoint  = flag.String("mount-point", "", "Where to mount the file system.")
-	thisip    = flag.String("ThisIP", "", "The IP address of this server for cache requests.")
-	remoteips = flag.String("RemoteIPs", "", "Comma separate list of IPs for remote servers.")
-	rpcPort   = flag.String("RemotePort", "5556", "Port to use for connection with remote servers.")
+	thisip    = flag.String("thisip", "", "The IP address of this server for cache requests.")
+	remoteips = flag.String("remoteips", "", "Comma separate list of IPs for remote servers.")
+	rpcPort   = flag.String("remoteport", "5556", "Port to use for connection with remote servers.")
+	memLimit  = flag.Int("memlimitmb", 0, "Optionally limit how much memory can be used. Recommended, otherwise process will keep caching until something blows up.")
 
-	nfsfs     *Nfsfs
-	nfstarget *nfs.Target
+	nfsfs       *Nfsfs
+	nfstarget   *nfs.Target
+	cachelock   sync.Mutex
+	cachedNodes []CachedNode
 
 	remoteServers     []string
 	remoteCachedFiles map[string]string
@@ -55,12 +60,19 @@ type Node struct {
 	data     []byte
 	opencnt  int
 	cache    FileCache
+	// when     time.Time
 }
 
 // FileCache represents in memory cached byte ranges
 type FileCache struct {
 	byteRanges []ByteRange
 	lock       sync.Mutex
+}
+
+// CachedNode represents when a node was cached. Used for cache-eviction
+type CachedNode struct {
+	node       *Node
+	timeCached time.Time
 }
 
 // ByteRange for a chunk of cached data
@@ -122,9 +134,31 @@ func main() {
 
 	defer nfstarget.Close()
 
+	printMemUsage()
+
 	nfsfs = newfs()
 	host := fuse.NewFileSystemHost(nfsfs)
 	host.Mount(*mntpoint, []string{})
+}
+
+func getMemoryUsedMB() int {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	return int(m.Alloc / 1024 / 1024)
+}
+
+func printMemUsage() {
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+	// For info on each, see: https://golang.org/pkg/runtime/#MemStats
+	fmt.Printf("Alloc = %v MiB", bToMb(m.Alloc))
+	fmt.Printf("\tTotalAlloc = %v MiB", bToMb(m.TotalAlloc))
+	fmt.Printf("\tSys = %v MiB", bToMb(m.Sys))
+	fmt.Printf("\tNumGC = %v\n", m.NumGC)
+}
+
+func bToMb(b uint64) uint64 {
+	return b / 1024 / 1024
 }
 
 func connectNFS() error {
@@ -259,7 +293,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	if endoffset < offset {
 		return 0
 	}
-	// fmt.Println("\n1. Read() - offsets:\t\t\t", offset, endoffset, len(buff), path)
+	fmt.Println("1. Read() - offsets:\t\t\t", offset, endoffset, len(buff), path)
 
 	// 1. See if we have this byte range cached locally in memory
 	numb, newCacheItemRequired := fetchLocalCacheData(node, offset, endoffset, buff)
@@ -395,6 +429,12 @@ func (fs *Nfsfs) Chflags(path string, flags uint32) (errc int) {
 func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff []byte, offset, endoffset int64) {
 
 	if newByteRangeRequired {
+		if len(node.cache.byteRanges) == 0 {
+			// If first byteRange then add to list of cached items by time
+			cachelock.Lock()
+			cachedNodes = append(cachedNodes, CachedNode{node: node, timeCached: time.Now()})
+			cachelock.Unlock()
+		}
 		node.cache.lock.Lock()
 		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
 		node.cache.lock.Unlock()
@@ -408,7 +448,58 @@ func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff [
 		// Resize for the entire file so we don't resize every time
 		node.data = resize(node.data, node.stat.Size, false)
 	}
+
+	// Check memory usage if memLimit has been set
+	if *memLimit != 0 {
+		memUsedMB := getMemoryUsedMB()
+		if memUsedMB > *memLimit {
+			fmt.Println("Memory Used MB:", memUsedMB, *memLimit)
+			printMemUsage()
+			// remove oldest item from cache
+			findAndRemoveEarliestCacheItems(memUsedMB - *memLimit)
+		}
+	}
+
 	copy(node.data[offset:endoffset], buff)
+}
+
+func findAndRemoveEarliestCacheItems(memToFreeMB int) {
+
+	if len(cachedNodes) <= 1 {
+		return
+	}
+
+	cachelock.Lock()
+	sort.Slice(cachedNodes, func(i, j int) bool {
+		return cachedNodes[i].timeCached.Before(cachedNodes[j].timeCached)
+	})
+
+	fmt.Println("CachedItems - Before:", len(cachedNodes))
+
+	freedMem := 0
+	count := 0
+	for i := 0; i < len(cachedNodes); i++ {
+		freedMem += len(cachedNodes[0].node.data)
+		count++
+
+		cachedNodes[i].node.cache.lock.Lock()
+		cachedNodes[i].node.cache.byteRanges = []ByteRange{}
+		cachedNodes[i].node.cache.lock.Unlock()
+		cachedNodes[i].node.data = []byte{}
+
+		if freedMem >= memToFreeMB {
+			break
+		}
+	}
+
+	cachedNodes = cachedNodes[count:]
+	fmt.Println("CachedItems - After:", len(cachedNodes), count)
+	cachelock.Unlock()
+
+	// Call GC
+	runtime.GC()
+	printMemUsage()
+
 }
 
 // reduceFileCache merges byte ranges where possible.
@@ -493,6 +584,7 @@ func fetchLocalCacheData(node *Node, offset, endoffset int64,
 		fmt.Println("fetchLocalCacheData() - Cache Hit!", offset, endoffset, len(buff))
 		copy(buff, node.data[offset:endoffset])
 		numBytes = int(endoffset - offset)
+		// TODO: update last access time in cache
 	}
 	return
 }
