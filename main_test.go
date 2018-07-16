@@ -5,6 +5,81 @@ import (
 	"time"
 )
 
+func TestReadCallsLocalCache(t *testing.T) {
+
+	fs := newfs()
+	node := createTestNode()
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 5})
+	node.data = []byte{0, 1, 2, 3, 4}
+	node.stat.Size = 5
+
+	buff := make([]byte, 5)
+
+	filepath := "file"
+	fs.root.children[filepath] = node
+	fs.Open(filepath, 0)
+	fs.Read(filepath, buff, 0, 1)
+
+	for i := 0; i < 5; i++ {
+		if buff[i] != byte(i) {
+			t.Error("Invalid data returned from cache -", i, buff[i])
+		}
+	}
+}
+
+func TestReadWithOffsetCallsLocalCache(t *testing.T) {
+
+	fs := newfs()
+	node := createTestNode()
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
+	node.data = []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+	node.stat.Size = 10
+
+	buff := make([]byte, 5)
+
+	filepath := "file"
+	fs.root.children[filepath] = node
+	fs.Open(filepath, 0)
+	// use offset of 3
+	fs.Read(filepath, buff, 3, 1)
+
+	for i := 0; i < 5; i++ {
+		if buff[i] != byte(i+3) {
+			t.Error("Invalid data returned from cache -", i, buff[i])
+		}
+	}
+
+}
+
+func TestReadWithRemoteCacheFetchOverRPC(t *testing.T) {
+
+	go setupRPCListener("5555")
+
+	remoteServers = []string{"localhost"}
+	filepath := "file"
+	remoteCachedFiles = make(map[string]string)
+	remoteCachedFiles[filepath] = "localhost"
+
+	node := createTestNode()
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 5})
+	node.data = []byte{0, 1, 2, 3, 4}
+	node.stat.Size = 5
+
+	buff := make([]byte, 5)
+
+	nfsfs = newfs()
+	nfsfs.root.children[filepath] = node
+	nfsfs.Open(filepath, 0)
+
+	tryRemoteCache(filepath, 1, node, 0, 5, buff)
+
+	for i := 0; i < 5; i++ {
+		if buff[i] != byte(i) {
+			t.Error("Invalid data returned from cache -", i, buff[i])
+		}
+	}
+}
+
 func TestCanFetchFromLocalCache(t *testing.T) {
 
 	node := createTestNode()
@@ -12,11 +87,11 @@ func TestCanFetchFromLocalCache(t *testing.T) {
 
 	buff := make([]byte, 5)
 	node.data = []byte{0, 1, 2, 3, 4}
-	numb, extendCacheItem := fetchLocalCacheData(node, 0, 5, buff)
+	numb, extendCacheItem := fetchLocalCacheData("file", node, 0, 5, buff)
 
 	for i := 0; i < 5; i++ {
 		if buff[i] != byte(i) {
-			t.Error("Invalid data returened from cache -", i, buff[i])
+			t.Error("Invalid data returned from cache -", i, buff[i])
 		}
 	}
 
@@ -36,7 +111,7 @@ func TestCanExpandLocalCacheHigh(t *testing.T) {
 
 	buff := make([]byte, 1)
 	node.data = buff
-	numb, extendCacheItem := fetchLocalCacheData(node, 0, 10, buff)
+	numb, extendCacheItem := fetchLocalCacheData("file", node, 0, 10, buff)
 
 	if !extendCacheItem {
 		t.Error("extendCacheItem should be true")
@@ -58,7 +133,7 @@ func TestCanExpandLocalCacheLow(t *testing.T) {
 
 	buff := make([]byte, 1)
 	node.data = buff
-	numb, extendCacheItem := fetchLocalCacheData(node, 0, 7, buff)
+	numb, extendCacheItem := fetchLocalCacheData("file", node, 0, 7, buff)
 
 	if !extendCacheItem {
 		t.Error("extendCacheItem should be true")
@@ -225,6 +300,7 @@ func TestRemoteCacheFetchWithNoCacheList(t *testing.T) {
 
 func TestLocalCacheAfterRemoteCacheFetch(t *testing.T) {
 	//TODO: TestLocalCacheAfterRemoteCacheFetch
+	// Hard to test on a single machine as the same data structures are used!
 }
 
 func TestMemoryLimit(t *testing.T) {
