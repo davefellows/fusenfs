@@ -317,7 +317,7 @@ func TestMemoryLimit(t *testing.T) {
 	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
 
 	cachedNodes = cacheNodes
-	findAndRemoveEarliestCacheItems(10)
+	freeMemory(10)
 
 	if len(nodeThatShouldBeRemoved.data) > 0 {
 		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.data))
@@ -348,7 +348,7 @@ func TestMemoryLimitWithModifiedNode(t *testing.T) {
 	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
 
 	cachedNodes = cacheNodes
-	findAndRemoveEarliestCacheItems(10)
+	freeMemory(10)
 
 	if len(nodeThatShouldBeRemoved.data) > 0 {
 		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.data))
@@ -358,6 +358,58 @@ func TestMemoryLimitWithModifiedNode(t *testing.T) {
 		t.Error("Expecting node's byteRanges to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.cache.byteRanges))
 	}
 
+}
+
+func TestFileNotCachedIfMemoryLimitReached(t *testing.T) {
+
+	*memLimit = 1
+	fs := newfs()
+	node := createTestNode()
+	node.stat.Size = 1500
+
+	buff := make([]byte, 5)
+
+	filepath := "file"
+	fs.root.children[filepath] = node
+	fs.Open(filepath, 0)
+	fs.Read(filepath, buff, 0, 1)
+
+	// for i := 0; i < 5; i++ {
+	// 	if buff[i] != byte(i) {
+	// 		t.Error("Invalid data returned from cache -", i, buff[i])
+	// 	}
+	// }
+}
+
+func TestEvictModifiedFilesFromCache(t *testing.T) {
+	nodeThatShouldBeRemoved := createTestNode()
+	nodes := []*Node{createTestNode(), createTestNode(), nodeThatShouldBeRemoved}
+
+	cacheNodes := []CachedNode{
+		CachedNode{path: "filestays", node: nodes[0], timeCached: time.Now()},
+		CachedNode{path: "filestays", node: nodes[1], timeCached: time.Now()},
+		CachedNode{path: "filegos", node: nodes[2], timeCached: time.Now()},
+	}
+
+	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
+
+	cachedNodes = cacheNodes
+
+	evictModifiedFilesFromCache(func(path string) time.Time {
+		if path == "filegos" {
+			return time.Now().Add(time.Second)
+		}
+		return time.Now().Add(-time.Minute)
+	})
+
+	if len(nodeThatShouldBeRemoved.data) > 0 {
+		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.data))
+	}
+
+	if len(nodeThatShouldBeRemoved.cache.byteRanges) > 0 {
+		t.Error("Expecting node's byteRanges to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.cache.byteRanges))
+	}
 }
 
 func mockRPCCall(method string, args interface{}, reply interface{}) error {
