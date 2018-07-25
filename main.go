@@ -456,11 +456,17 @@ func evictModifiedFilesFromCacheLoop() {
 // evictModifiedFilesFromCache removes any items from the cache
 // if they've been modified since they were added.
 func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
+	if len(cachedNodes) == 0 {
+		return
+	}
+	log.Println("CacheEviction. Len before:", len(cachedNodes))
+
 	for i := len(cachedNodes) - 1; i >= 0; i-- {
 		cachedNode := cachedNodes[i]
 		path := cachedNode.path
 
 		modTime := getFileModTime(path)
+		log.Println("CacheEviction. Node:", i, path, cachedNode.timeCached, modTime)
 
 		// see if file has been modified since we cached it
 		if modTime.After(cachedNode.timeCached) {
@@ -485,6 +491,7 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 			broadcastCachedFileRemoved(path)
 		}
 	}
+	log.Println("CacheEviction. Len after:", len(cachedNodes))
 }
 
 func getFileModTimeFromNFS(path string) time.Time {
@@ -506,7 +513,7 @@ func getFileModTimeFromNFS(path string) time.Time {
 	return file.ModTime()
 }
 
-// tryRemoteCache first checks if a file has been broadcast as
+// tryRemoteCache first checks if the file has been broadcast as
 // cached by a remote server then requests the required data range
 func tryRemoteCache(path string, fh uint64,
 	node *Node, offset, endoffset int64, buff []byte) (numb int) {
@@ -560,9 +567,7 @@ func getRemoteCacheData(filepath string, fh uint64, node *Node,
 	if response.NumbBytes > 0 {
 		// log.Println("4.1 RemoteCache GOT DATA.", filepath, response.NumbBytes)
 		copy(buff, response.Filedata)
-		node.cache.lock.Lock()
-		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
-		node.cache.lock.Unlock()
+		updateCacheMetadataForNode(filepath, node, offset, endoffset)
 	} else {
 		log.Println("4.2 RemoteCache NO DATA RECEIVED.", filepath)
 	}

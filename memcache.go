@@ -11,27 +11,7 @@ import (
 func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff []byte, offset, endoffset int64) {
 
 	if newByteRangeRequired {
-		if len(node.cache.byteRanges) == 0 {
-			// If first byteRange then add to list of cached items by time
-			node.cache.cachedNode = CachedNode{
-				path:         path,
-				node:         node,
-				timeCached:   time.Now(),
-				lastAccessed: time.Now(),
-			}
-			cachelock.Lock()
-			cachedNodes = append(cachedNodes, node.cache.cachedNode)
-			cachelock.Unlock()
-		} else {
-			// Update last access time so we evict items with the oldest previous access
-			node.cache.cachedNode.lastAccessed = time.Now()
-			go reduceFileCache(node, path)
-		}
-		node.cache.lock.Lock()
-		node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
-		node.cache.lock.Unlock()
-
-		// log.Println("Update local cache. New byte range added:", path, len(node.cache.byteRanges))
+		updateCacheMetadataForNode(path, node, offset, endoffset)
 	}
 
 	if int64(len(node.data)) < endoffset {
@@ -50,6 +30,30 @@ func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff [
 	}
 
 	copy(node.data[offset:endoffset], buff)
+}
+
+func updateCacheMetadataForNode(path string, node *Node, offset, endoffset int64) {
+
+	log.Println("Update cache metadata:", path, len(node.cache.byteRanges))
+	if len(node.cache.byteRanges) == 0 {
+		// If first byteRange then add to list of cached items by time
+		node.cache.cachedNode = CachedNode{
+			path:         path,
+			node:         node,
+			timeCached:   time.Now(),
+			lastAccessed: time.Now(),
+		}
+		cachelock.Lock()
+		cachedNodes = append(cachedNodes, node.cache.cachedNode)
+		cachelock.Unlock()
+	} else {
+		// Update last access time so we evict items with the oldest previous access
+		node.cache.cachedNode.lastAccessed = time.Now()
+		go reduceFileCache(node, path)
+	}
+	node.cache.lock.Lock()
+	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
+	node.cache.lock.Unlock()
 }
 
 // reduceFileCache merges byte ranges where possible.
