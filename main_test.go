@@ -381,14 +381,14 @@ func TestFileNotCachedIfMemoryLimitReached(t *testing.T) {
 	// }
 }
 
-func TestEvictModifiedFilesFromCache(t *testing.T) {
+func TestEvictModifiedFileFromCache(t *testing.T) {
 	nodeThatShouldBeRemoved := createTestNode()
 	nodes := []*Node{createTestNode(), createTestNode(), nodeThatShouldBeRemoved}
 
 	cacheNodes := []CachedNode{
-		CachedNode{path: "filestays", node: nodes[0], timeCached: time.Now()},
-		CachedNode{path: "filestays", node: nodes[1], timeCached: time.Now()},
-		CachedNode{path: "filegos", node: nodes[2], timeCached: time.Now()},
+		CachedNode{path: "file.stays", node: nodes[0], timeCached: time.Now()},
+		CachedNode{path: "file.stays", node: nodes[1], timeCached: time.Now()},
+		CachedNode{path: "file.gos", node: nodes[2], timeCached: time.Now()},
 	}
 
 	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
@@ -397,11 +397,15 @@ func TestEvictModifiedFilesFromCache(t *testing.T) {
 	cachedNodes = cacheNodes
 
 	evictModifiedFilesFromCache(func(path string) time.Time {
-		if path == "filegos" {
+		if path == "file.gos" {
 			return time.Now().Add(time.Second)
 		}
 		return time.Now().Add(-time.Minute)
 	})
+
+	if len(cachedNodes) != 2 {
+		t.Error("Expecting 2 nodes to remain in cache. Len:", len(cachedNodes))
+	}
 
 	if len(nodeThatShouldBeRemoved.data) > 0 {
 		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.data))
@@ -409,6 +413,60 @@ func TestEvictModifiedFilesFromCache(t *testing.T) {
 
 	if len(nodeThatShouldBeRemoved.cache.byteRanges) > 0 {
 		t.Error("Expecting node's byteRanges to be empty/zero length. Len:", len(nodeThatShouldBeRemoved.cache.byteRanges))
+	}
+}
+
+func TestEvictMultipleModifiedFilesFromCache(t *testing.T) {
+	nodeThatShouldBeRemoved1 := createTestNode()
+	nodeThatShouldBeRemoved2 := createTestNode()
+	nodeThatShouldBeRemoved3 := createTestNode()
+	nodes := []*Node{
+		createTestNode(),
+		nodeThatShouldBeRemoved1,
+		nodeThatShouldBeRemoved2,
+		createTestNode(),
+		nodeThatShouldBeRemoved3}
+
+	cacheNodes := []CachedNode{
+		CachedNode{path: "file.stays", node: nodes[0], timeCached: time.Now()},
+		CachedNode{path: "file.gos", node: nodes[1], timeCached: time.Now()},
+		CachedNode{path: "file.gos", node: nodes[2], timeCached: time.Now()},
+		CachedNode{path: "file.stays", node: nodes[3], timeCached: time.Now()},
+		CachedNode{path: "file.gos", node: nodes[4], timeCached: time.Now()},
+	}
+
+	nodeThatShouldBeRemoved1.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved1.data = []byte{0, 1, 2}
+	nodeThatShouldBeRemoved2.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved2.data = []byte{0, 1, 2}
+	nodeThatShouldBeRemoved3.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved3.data = []byte{0, 1, 2}
+
+	cachedNodes = cacheNodes
+
+	evictModifiedFilesFromCache(func(path string) time.Time {
+		if path == "file.gos" {
+			return time.Now().Add(time.Second)
+		}
+		return time.Now().Add(-time.Minute)
+	})
+
+	if len(cachedNodes) != 2 {
+		t.Error("Expecting 2 nodes to remain in cache. Len:", len(cachedNodes))
+	}
+
+	if len(nodeThatShouldBeRemoved1.data) > 0 {
+		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved1.data))
+	}
+
+	if len(nodeThatShouldBeRemoved1.cache.byteRanges) > 0 {
+		t.Error("Expecting node's byteRanges to be empty/zero length. Len:", len(nodeThatShouldBeRemoved1.cache.byteRanges))
+	}
+	if len(nodeThatShouldBeRemoved2.data) > 0 {
+		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved2.data))
+	}
+	if len(nodeThatShouldBeRemoved3.data) > 0 {
+		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved3.data))
 	}
 }
 
