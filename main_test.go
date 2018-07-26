@@ -87,7 +87,7 @@ func TestCanFetchFromLocalCache(t *testing.T) {
 
 	buff := make([]byte, 5)
 	node.data = []byte{0, 1, 2, 3, 4}
-	numb, extendCacheItem := fetchLocalCacheData("file", node, 0, 5, buff)
+	numb, newCacheItemRequired := fetchLocalCacheData("file", node, 0, 5, buff)
 
 	for i := 0; i < 5; i++ {
 		if buff[i] != byte(i) {
@@ -99,8 +99,8 @@ func TestCanFetchFromLocalCache(t *testing.T) {
 		t.Error("Number of bytes read from cache should be 5")
 	}
 
-	if extendCacheItem {
-		t.Error("extendCacheItem should be false")
+	if !newCacheItemRequired {
+		t.Error("newCacheItemRequired should be true")
 	}
 }
 
@@ -111,10 +111,10 @@ func TestCanExpandLocalCacheHigh(t *testing.T) {
 
 	buff := make([]byte, 1)
 	node.data = buff
-	numb, extendCacheItem := fetchLocalCacheData("file", node, 0, 10, buff)
+	numb, newCacheItemRequired := fetchLocalCacheData("file", node, 0, 10, buff)
 
-	if !extendCacheItem {
-		t.Error("extendCacheItem should be true")
+	if newCacheItemRequired {
+		t.Error("newCacheItemRequired should be false")
 	}
 
 	if node.cache.byteRanges[0].high != 5 {
@@ -133,10 +133,10 @@ func TestCanExpandLocalCacheLow(t *testing.T) {
 
 	buff := make([]byte, 1)
 	node.data = buff
-	numb, extendCacheItem := fetchLocalCacheData("file", node, 0, 7, buff)
+	numb, newCacheItemRequired := fetchLocalCacheData("file", node, 0, 7, buff)
 
-	if !extendCacheItem {
-		t.Error("extendCacheItem should be true")
+	if newCacheItemRequired {
+		t.Error("newCacheItemRequired should be false")
 	}
 
 	if node.cache.byteRanges[0].low != 5 {
