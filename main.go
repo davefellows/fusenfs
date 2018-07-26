@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"flag"
 	"io"
@@ -8,7 +9,9 @@ import (
 	"net"
 	"net/rpc"
 	"os"
+	"path"
 	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"time"
@@ -26,13 +29,17 @@ const (
 )
 
 var (
-	nfshost   = flag.String("nfs-server", "localhost", "The hostname/IP for the NFS Server.")
-	target    = flag.String("nfs-target", "/C/temp", "The target/path on the NFS Server.")
-	mntpoint  = flag.String("mount-point", "", "Where to mount the file system.")
+	nfshost  = flag.String("nfs-server", "localhost", "The hostname/IP for the NFS Server.")
+	target   = flag.String("nfs-target", "/C/temp", "The target/path on the NFS Server.")
+	nfsmount = flag.String("nfs-mount", "/C/temp", "The path where the NFS export has been mounted.")
+
+	mntpoint  = flag.String("mount-point", "", "Where to mount the FUSE file system.")
 	thisip    = flag.String("thisip", "", "The IP address of this server for cache requests.")
 	remoteips = flag.String("remoteips", "", "Comma separate list of IPs for remote servers.")
 	rpcPort   = flag.String("remoteport", "5555", "Port to use for connection with remote servers.")
 	memLimit  = flag.Int("memlimitmb", 0, "Optionally limit how much memory can be used. Recommended, otherwise process will keep caching until something blows up.")
+
+	cpuprofile = flag.String("cpuprofile", "", "Optional CPU Profile file to write.")
 
 	nfsfs       *Nfsfs
 	nfstarget   *nfs.Target
@@ -42,6 +49,8 @@ var (
 
 	remoteServers     []string
 	remoteCachedFiles map[string]string
+
+	perffile *os.File
 )
 
 // Nfsfs is the main file system structure
@@ -134,6 +143,16 @@ func main() {
 	log.Println("Remote servers:", len(remoteServers), remoteServers)
 	log.Println("Remote port:", *rpcPort)
 	log.Println("Memory limit:", *memLimit)
+
+	if *cpuprofile != "" {
+		perffile, err := os.Create(*cpuprofile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("CPU Profiling on.", perffile.Name)
+		pprof.StartCPUProfile(perffile)
+		defer pprof.StopCPUProfile()
+	}
 
 	if len(remoteServers) > 0 {
 		go setupRPCListener(*rpcPort)
@@ -290,7 +309,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	// TODO: should still cache to local file system. This is difficult
 	// as we only write local file once we've cached the entire thing in memory
 	if *memLimit != 0 && bToMb(node.stat.Size) > *memLimit {
-		numb = readFileFromNFS(path, node, buff, offset, endoffset)
+		numb = readFileFromLocalNFSMount(path, node, buff, offset, endoffset)
 		if offset == 0 || endoffset == node.stat.Size {
 			log.Println("Read() - read from NFS: \t", offset, endoffset, len(buff), path)
 		}
@@ -300,7 +319,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 	}
 
 	// 1. See if we have this byte range cached locally in memory
-	numb, newCacheItemRequired := fetchLocalCacheData(path, node, offset, endoffset, buff)
+	numb, newCacheItemRequired := fetchMemCacheData(path, node, offset, endoffset, buff)
 	if numb > 0 {
 		return numb
 	}
@@ -316,7 +335,7 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 
 	if numb == 0 {
 		// 4. Otherwise, get from NFS
-		numb = readFileFromNFS(path, node, buff, offset, endoffset)
+		numb = readFileFromLocalNFSMount(path, node, buff, offset, endoffset)
 		if offset == 0 || endoffset == node.stat.Size {
 			log.Println("Read() - read from NFS: \t", offset, endoffset, len(buff), path)
 		}
@@ -400,6 +419,9 @@ func (fs *Nfsfs) populateDir(path string,
 	}
 
 	for _, item := range items {
+		// if filepath.Ext(item.FileName) == ".inf" {
+		// 	continue
+		// }
 		fs.ino++
 		mode := uint32(item.Attr.Attr.Mode())
 		if item.Attr.Attr.IsDir() {
@@ -459,14 +481,14 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 	if len(cachedNodes) == 0 {
 		return
 	}
-	log.Println("CacheEviction. Len before:", len(cachedNodes))
+	// log.Println("CacheEviction. Len before:", len(cachedNodes))
 
 	for i := len(cachedNodes) - 1; i >= 0; i-- {
 		cachedNode := cachedNodes[i]
 		path := cachedNode.path
 
 		modTime := getFileModTime(path)
-		log.Println("CacheEviction. Node:", i, path, cachedNode.timeCached, modTime)
+		// log.Println("CacheEviction. Node:", i, path, cachedNode.timeCached, modTime)
 
 		// see if file has been modified since we cached it
 		if modTime.After(cachedNode.timeCached) {
@@ -491,7 +513,7 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 			broadcastCachedFileRemoved(path)
 		}
 	}
-	log.Println("CacheEviction. Len after:", len(cachedNodes))
+	// log.Println("CacheEviction. Len after:", len(cachedNodes))
 }
 
 func getFileModTimeFromNFS(path string) time.Time {
@@ -553,11 +575,8 @@ func getRemoteCacheData(filepath string, fh uint64, node *Node,
 		Fh:        fh,
 		Offset:    offset,
 		Endoffset: endoffset,
-		Filedata:  buff,
 	}
 	response := new(CachedDataResponse)
-	//TODO: Figure out why response buffer doesn't make it to through RPC call
-	// response.Filedata = buff
 
 	err := rpcCall(getFileDataHandlerName, request, response)
 	if err != nil {
@@ -613,6 +632,42 @@ func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int
 			break
 		}
 	}
+	return numb
+}
+
+// readFileFromLocalNFSMount reads the specified file from the local NFS mount
+// Should only be called once per byte range per file (assuming we have sufficient memory)
+func readFileFromLocalNFSMount(filepath string, node *Node, buff []byte, offset, endoffset int64) (numb int) {
+
+	newfile := path.Join(*nfsmount, filepath)
+
+	if _, err := os.Stat(newfile); os.IsNotExist(err) {
+		return 0
+	}
+
+	file, err := os.Open(newfile)
+	if err != nil {
+		log.Println("Error opening from NFS mount.", filepath, err)
+		return 0
+	}
+	defer file.Close()
+
+	_, err = file.Seek(offset, 0)
+	if err != nil {
+		log.Println("Error seeking on NFS mount.", filepath, offset, err)
+		return 0
+	}
+
+	reader := bufio.NewReader(file)
+	numb, err = reader.Read(buff)
+	if err != nil {
+		log.Println("Error reading from local NFS mount.", filepath, offset, err)
+		return 0
+	}
+	// if numBytes > 0 && (offset == 0 || endoffset == node.stat.Size) {
+	// 	log.Println("Read() - local FS cache hit:", offset, endoffset, len(buff), filepath)
+	// }
+
 	return numb
 }
 
@@ -852,11 +907,10 @@ func (h *RPCHandler) GetFileData(req CachedDataRequest, res *CachedDataResponse)
 		return errors.New("no cache data found for file: " + req.Filepath)
 	}
 
-	// HACK: Only way could get byte slice to come through correctly was
-	// in the request so need to copy it over to the response here.
-	res.Filedata = req.Filedata
+	len := req.Endoffset - req.Offset
+	res.Filedata = make([]byte, len)
 
-	res.NumbBytes, _ = fetchLocalCacheData(req.Filepath, node, req.Offset, req.Endoffset, res.Filedata)
+	res.NumbBytes, _ = fetchMemCacheData(req.Filepath, node, req.Offset, req.Endoffset, res.Filedata)
 	// log.Println("2.1 GetFileData() - Ret data: ", res.NumbBytes)
 	return
 }

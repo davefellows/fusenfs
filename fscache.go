@@ -73,6 +73,8 @@ func fetchLocalFSCacheData(filepath string, node *Node, offset, endoffset int64,
 		log.Println("Error opening local cache file.", filepath, err)
 		return 0
 	}
+	defer file.Close()
+
 	_, err = file.Seek(offset, 0)
 	if err != nil {
 		log.Println("Error seeking on local cache file.", filepath, offset, err)
@@ -82,7 +84,7 @@ func fetchLocalFSCacheData(filepath string, node *Node, offset, endoffset int64,
 	reader := bufio.NewReader(file)
 	numBytes, err = reader.Read(buff)
 	if err != nil {
-		log.Println("Error reading from local cache file.", filepath, err)
+		log.Println("Error reading from local cache file.", filepath, offset, err)
 		return 0
 	}
 	if numBytes > 0 && (offset == 0 || endoffset == node.stat.Size) {

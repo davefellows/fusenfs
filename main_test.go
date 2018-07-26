@@ -87,7 +87,7 @@ func TestCanFetchFromLocalCache(t *testing.T) {
 
 	buff := make([]byte, 5)
 	node.data = []byte{0, 1, 2, 3, 4}
-	numb, newCacheItemRequired := fetchLocalCacheData("file", node, 0, 5, buff)
+	numb, newCacheItemRequired := fetchMemCacheData("file", node, 0, 5, buff)
 
 	for i := 0; i < 5; i++ {
 		if buff[i] != byte(i) {
@@ -111,7 +111,7 @@ func TestCanExpandLocalCacheHigh(t *testing.T) {
 
 	buff := make([]byte, 1)
 	node.data = buff
-	numb, newCacheItemRequired := fetchLocalCacheData("file", node, 0, 10, buff)
+	numb, newCacheItemRequired := fetchMemCacheData("file", node, 0, 10, buff)
 
 	if newCacheItemRequired {
 		t.Error("newCacheItemRequired should be false")
@@ -133,7 +133,7 @@ func TestCanExpandLocalCacheLow(t *testing.T) {
 
 	buff := make([]byte, 1)
 	node.data = buff
-	numb, newCacheItemRequired := fetchLocalCacheData("file", node, 0, 7, buff)
+	numb, newCacheItemRequired := fetchMemCacheData("file", node, 0, 7, buff)
 
 	if newCacheItemRequired {
 		t.Error("newCacheItemRequired should be false")
@@ -468,6 +468,10 @@ func TestEvictMultipleModifiedFilesFromCache(t *testing.T) {
 	if len(nodeThatShouldBeRemoved3.data) > 0 {
 		t.Error("Expecting node's data to be empty/zero length. Len:", len(nodeThatShouldBeRemoved3.data))
 	}
+}
+
+func TestPopulateDir(t *testing.T) {
+	//TODO: Need to test this!
 }
 
 func mockRPCCall(method string, args interface{}, reply interface{}) error {

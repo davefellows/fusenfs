@@ -34,7 +34,7 @@ func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff [
 
 func updateCacheMetadataForNode(path string, node *Node, offset, endoffset int64) {
 
-	log.Println("Update cache metadata:", path, len(node.cache.byteRanges))
+	// log.Println("Update cache metadata:", path, len(node.cache.byteRanges))
 	if len(node.cache.byteRanges) == 0 {
 		// If first byteRange then add to list of cached items by time
 		node.cache.cachedNode = CachedNode{
@@ -106,7 +106,7 @@ func reduceFileCache(node *Node, filepath string) {
 
 // fetchLocalCacheData scans the in memory cache for the
 // file and requested byte range. Copies to buff if found.
-func fetchLocalCacheData(path string, node *Node, offset, endoffset int64,
+func fetchMemCacheData(path string, node *Node, offset, endoffset int64,
 	buff []byte) (numBytes int, newCacheItemRequired bool) {
 
 	cacheHit := false
