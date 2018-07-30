@@ -405,7 +405,7 @@ func TestEvictModifiedFileFromCache(t *testing.T) {
 	cachedNodes = cacheNodes
 
 	evictModifiedFilesFromCache(func(path string) time.Time {
-		if path == "file.gos" {
+		if strings.Contains(path, "file.gos") {
 			return time.Now().Add(time.Second)
 		}
 		return time.Now().Add(-time.Minute)
@@ -453,7 +453,7 @@ func TestEvictMultipleModifiedFilesFromCache(t *testing.T) {
 	cachedNodes = cacheNodes
 
 	evictModifiedFilesFromCache(func(path string) time.Time {
-		if path == "file.gos" {
+		if strings.Contains(path, "file.gos") {
 			return time.Now().Add(time.Second)
 		}
 		return time.Now().Add(-time.Minute)
@@ -487,7 +487,7 @@ func TestDeleteLocalCacheFilesIfModified(t *testing.T) {
 	basedir := path.Join(usr.HomeDir, "testcachedir")
 	createTestData(basedir, 2)
 
-	removedFiles := deleteLocalCacheFilesIfModified(basedir, func(path string) time.Time {
+	removedFiles := deleteLocalCacheFilesIfModified(basedir, "", func(path string) time.Time {
 		if strings.Contains(path, "1.file") {
 			return time.Now().Add(time.Second)
 		}

@@ -311,12 +311,10 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 
 	// 2.  Check if the file is cached on disk
 	numb = fetchLocalFSCacheData(path, node, offset, endoffset, buff)
-	if numb > 0 {
-		return numb
+	if numb == 0 {
+		// 3. See if we have this file cached with one of our remotes
+		numb = tryRemoteCache(path, fh, node, offset, endoffset, buff)
 	}
-
-	// 3. See if we have this file cached with one of our remotes
-	numb = tryRemoteCache(path, fh, node, offset, endoffset, buff)
 
 	if numb == 0 {
 		// 4. Otherwise, get from NFS
@@ -462,14 +460,16 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 
 	for i := len(cachedNodes) - 1; i >= 0; i-- {
 		cachedNode := cachedNodes[i]
-		path := cachedNode.path
+		filepath := cachedNode.path
 
-		modTime := getFileModTime(path)
+		fullpath := path.Join(*nfsmount, filepath)
+		modTime := getFileModTime(fullpath)
+
 		// log.Println("CacheEviction. Node:", i, path, cachedNode.timeCached, modTime)
 
 		// see if file has been modified since we cached it
 		if modTime.After(cachedNode.timeCached) {
-			log.Println("Removing file from cache as modified time is more recent.", path, modTime)
+			log.Println("Removing file from cache as modified time is more recent.", filepath, modTime)
 
 			//TODO: Check deadlock possibility
 			cachedNode.node.cache.lock.Lock()
@@ -485,9 +485,9 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 			cachelock.Unlock()
 
 			//TODO: Remove from local file system cache
-			removeFileFromFSCache(path)
+			removeFileFromFSCache(filepath)
 
-			broadcastCachedFileRemoved(path)
+			broadcastCachedFileRemoved(filepath)
 		}
 	}
 	// log.Println("CacheEviction. Len after:", len(cachedNodes))
@@ -495,9 +495,9 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 
 func getFileModTimeFromNFS(filepath string) time.Time {
 
-	fullpath := path.Join(*nfsmount, filepath)
+	// fullpath := path.Join(*nfsmount, filepath)
 
-	file, err := os.Stat(fullpath)
+	file, err := os.Stat(filepath)
 	if err != nil {
 		log.Println("getFileModTimeFromNFS() error for path:", filepath, err.Error())
 	}

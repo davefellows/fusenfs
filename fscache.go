@@ -18,19 +18,19 @@ func setupLocalFSCache(cacheDir string) (cachePath string) {
 	}
 	cachePath = path.Join(usr.HomeDir, cacheDir)
 	// create cache dir if doesn't already exist
-	err = os.MkdirAll(cachePath, 0500)
+	err = os.MkdirAll(cachePath, 0700)
 	if err != nil {
 		log.Panicln(err)
 	}
 	log.Println("Created local filesystem cache dir:", cachePath)
 
 	// remove changed files
-	_ = deleteLocalCacheFilesIfModified(cachePath, getFileModTimeFromNFS)
+	_ = deleteLocalCacheFilesIfModified(cachePath, *nfsmount, getFileModTimeFromNFS)
 
 	return cachePath
 }
 
-func deleteLocalCacheFilesIfModified(cachePath string, getFileModTime func(path string) time.Time) (removedFiles []string) {
+func deleteLocalCacheFilesIfModified(cachePath, nfsPath string, getFileModTime func(path string) time.Time) (removedFiles []string) {
 
 	fileinfos, err := ioutil.ReadDir(cachePath)
 	if err != nil {
@@ -39,12 +39,15 @@ func deleteLocalCacheFilesIfModified(cachePath string, getFileModTime func(path 
 
 	for _, fi := range fileinfos {
 		fullpath := path.Join(cachePath, fi.Name())
+		nfsfullpath := path.Join(nfsPath, fi.Name())
+
 		if fi.IsDir() {
 			// recursively call for any subdirectories
-			files := deleteLocalCacheFilesIfModified(fullpath, getFileModTime)
+			files := deleteLocalCacheFilesIfModified(fullpath, nfsfullpath, getFileModTime)
 			removedFiles = append(removedFiles, files...)
 		} else {
-			modTime := getFileModTime(fullpath)
+			modTime := getFileModTime(nfsfullpath)
+			// log.Println("Checking local cache file.", fullpath, modTime, fi.ModTime())
 
 			if modTime.After(fi.ModTime()) {
 				log.Println("Removing file from local cache as NFS source modified.", fullpath)
@@ -65,10 +68,16 @@ func writeFileToFilesystem(filepath string, node *Node) {
 
 	log.Println("Write file to FS cache.", newfile)
 
+	// create cache dir if doesn't already exist
+	err := os.MkdirAll(path.Dir(newfile), 0700)
+	if err != nil {
+		log.Println("Error writing file to local cache. Path:", newfile, err.Error())
+	}
+
 	// open output file
 	fout, err := os.Create(newfile)
 	if err != nil {
-		log.Fatalln("Error creating local cache file.", err)
+		log.Println("Error creating local cache file.", err)
 		return
 	}
 
@@ -79,7 +88,7 @@ func writeFileToFilesystem(filepath string, node *Node) {
 	}()
 	w := bufio.NewWriter(fout)
 	if _, err := w.Write(node.data); err != nil {
-		log.Fatalln("Error writing to local cache file.", err)
+		log.Println("Error writing to local cache file.", err)
 	}
 }
 
