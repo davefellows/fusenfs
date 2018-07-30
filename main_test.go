@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"path"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -477,8 +478,28 @@ func TestEvictMultipleModifiedFilesFromCache(t *testing.T) {
 	}
 }
 
+func TestDeleteLocalCacheFilesIfModified(t *testing.T) {
+	usr, err := user.Current()
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	basedir := path.Join(usr.HomeDir, "testcachedir")
+	createTestData(basedir, 2)
+
+	removedFiles := deleteLocalCacheFilesIfModified(basedir, func(path string) time.Time {
+		if strings.Contains(path, "1.file") {
+			return time.Now().Add(time.Second)
+		}
+		return time.Now().Add(-time.Minute)
+	})
+
+	if len(removedFiles) != 3 {
+		t.Error("Expecting 3 removed files. Got:", len(removedFiles))
+	}
+}
 func TestPopulateDir(t *testing.T) {
-	//TODO: Need to test this!
+
 	usr, err := user.Current()
 	if err != nil {
 		log.Fatalln(err)

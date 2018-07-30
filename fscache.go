@@ -2,13 +2,15 @@ package main
 
 import (
 	"bufio"
+	"io/ioutil"
 	"log"
 	"os"
 	"os/user"
 	"path"
+	"time"
 )
 
-func createLocalCacheDir() (cachePath string) {
+func setupLocalFSCache(cacheDir string) (cachePath string) {
 	// get the user's current home directory
 	usr, err := user.Current()
 	if err != nil {
@@ -16,13 +18,45 @@ func createLocalCacheDir() (cachePath string) {
 	}
 	cachePath = path.Join(usr.HomeDir, cacheDir)
 	// create cache dir if doesn't already exist
-	//TODO: reduce permissions to cache directory
 	err = os.MkdirAll(cachePath, 0500)
 	if err != nil {
 		log.Panicln(err)
 	}
 	log.Println("Created local filesystem cache dir:", cachePath)
+
+	// remove changed files
+	_ = deleteLocalCacheFilesIfModified(cachePath, getFileModTimeFromNFS)
+
 	return cachePath
+}
+
+func deleteLocalCacheFilesIfModified(cachePath string, getFileModTime func(path string) time.Time) (removedFiles []string) {
+
+	fileinfos, err := ioutil.ReadDir(cachePath)
+	if err != nil {
+		log.Println("deleteLocalCacheFilesIfModified() - error:", err.Error())
+	}
+
+	for _, fi := range fileinfos {
+		fullpath := path.Join(cachePath, fi.Name())
+		if fi.IsDir() {
+			// recursively call for any subdirectories
+			files := deleteLocalCacheFilesIfModified(fullpath, getFileModTime)
+			removedFiles = append(removedFiles, files...)
+		} else {
+			modTime := getFileModTime(fullpath)
+
+			if modTime.After(fi.ModTime()) {
+				log.Println("Removing file from local cache as NFS source modified.", fullpath)
+				err := os.Remove(fullpath)
+				if err != nil {
+					log.Println("Error deleting local cache file.", fullpath, err.Error())
+				}
+				removedFiles = append(removedFiles, fullpath)
+			}
+		}
+	}
+	return
 }
 
 func writeFileToFilesystem(filepath string, node *Node) {

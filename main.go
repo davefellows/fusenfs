@@ -153,9 +153,9 @@ func main() {
 		go setupRPCListener(*rpcPort)
 	}
 
-	cachePath = createLocalCacheDir()
+	cachePath = setupLocalFSCache(cacheDir)
 
-	// start go routine to monitor for changes to files that are cache
+	// start go routine to monitor for changes to files that are cached
 	go evictModifiedFilesFromCacheLoop()
 
 	nfsfs = newfs()
