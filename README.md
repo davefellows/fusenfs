@@ -14,4 +14,4 @@ Requires Golang 1.10 to build the cgofuse dependency.
 
 Example command line:
 
-`./fusenfs -nfs-server=10.0.0.4 -nfs-target=/home/dafell/nfs -mount-point=/home/dafell/fn -remoteips=10.1.0.5 -thisip=10.1.0.4 -memlimitmb=2048`
+`./fusenfs -mount-point=/home/dafell/fn -remoteips=10.1.0.5 -thisip=10.1.0.4 -memlimitmb=2048`

@@ -4,7 +4,8 @@ import (
 	"bufio"
 	"errors"
 	"flag"
-	"io"
+	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
 	"net/rpc"
@@ -17,8 +18,6 @@ import (
 	"time"
 
 	"github.com/billziss-gh/cgofuse/fuse"
-	"github.com/vmware/go-nfs-client/nfs"
-	nfsrpc "github.com/vmware/go-nfs-client/nfs/rpc"
 )
 
 const (
@@ -29,9 +28,7 @@ const (
 )
 
 var (
-	nfshost  = flag.String("nfs-server", "localhost", "The hostname/IP for the NFS Server.")
-	target   = flag.String("nfs-target", "/C/temp", "The target/path on the NFS Server.")
-	nfsmount = flag.String("nfs-mount", "/C/temp", "The path where the NFS export has been mounted.")
+	nfsmount = flag.String("nfs-mount", "c:\\temp", "The path where the NFS export has been mounted.")
 
 	mntpoint  = flag.String("mount-point", "", "Where to mount the FUSE file system.")
 	thisip    = flag.String("thisip", "", "The IP address of this server for cache requests.")
@@ -42,7 +39,6 @@ var (
 	cpuprofile = flag.String("cpuprofile", "", "Optional CPU Profile file to write.")
 
 	nfsfs       *Nfsfs
-	nfstarget   *nfs.Target
 	cachelock   sync.Mutex
 	cachedNodes []CachedNode
 	cachePath   string
@@ -75,7 +71,7 @@ type Node struct {
 
 // FileCache represents in memory cached byte ranges
 type FileCache struct {
-	byteRanges []ByteRange
+	byteRanges []*ByteRange
 	cachedNode CachedNode
 	lock       sync.Mutex
 }
@@ -137,8 +133,7 @@ func main() {
 		remoteServers = strings.Split(*remoteips, ",")
 	}
 
-	log.Println("NFS host:", *nfshost)
-	log.Println("NFS target:", *target)
+	log.Println("NFS mount:", *nfsmount)
 	log.Println("Mount point:", *mntpoint)
 	log.Println("Remote servers:", len(remoteServers), remoteServers)
 	log.Println("Remote port:", *rpcPort)
@@ -149,7 +144,7 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-		log.Println("CPU Profiling on.", perffile.Name)
+		log.Println("CPU Profiling on.", perffile.Name())
 		pprof.StartCPUProfile(perffile)
 		defer pprof.StopCPUProfile()
 	}
@@ -160,13 +155,6 @@ func main() {
 
 	cachePath = createLocalCacheDir()
 
-	err := connectNFS()
-	if err != nil {
-		os.Exit(1)
-	}
-	defer nfstarget.Close()
-	log.Println("Connected to NFS", *nfshost, *target)
-
 	// start go routine to monitor for changes to files that are cache
 	go evictModifiedFilesFromCacheLoop()
 
@@ -174,24 +162,6 @@ func main() {
 	host := fuse.NewFileSystemHost(nfsfs)
 	host.Mount(*mntpoint, []string{})
 	defer host.Unmount()
-}
-
-func connectNFS() error {
-	mount, err := nfs.DialMount(*nfshost)
-	if err != nil {
-		log.Println("NFS: unable to dial MOUNT service:", err.Error())
-		return err
-	}
-	defer mount.Close()
-
-	//TODO: Check if needed
-	auth := nfsrpc.NewAuthUnix("", 1000, 1000)
-
-	nfstarget, err = mount.Mount(*target, auth.Auth())
-	if err != nil {
-		log.Println("NFS: unable to mount volume:", err.Error())
-	}
-	return err
 }
 
 func setupRPCListener(port string) {
@@ -214,7 +184,7 @@ func newfs() *Nfsfs {
 	fs := Nfsfs{}
 	defer fs.synchronize()()
 	fs.ino++
-	fs.root = newNode(0, fs.ino, fuse.S_IFDIR|00777, 0, 0)
+	fs.root = newNode(0, fs.ino, fuse.S_IFDIR|00555, 0, 0)
 	fs.openmap = map[string]*Node{}
 	return &fs
 }
@@ -227,7 +197,7 @@ func (fs *Nfsfs) Open(path string, flags int) (errc int, fh uint64) {
 
 	errc, fh = fs.openNode(path, false)
 	if errc != 0 {
-		log.Fatalln("Open() - Error: ", errc)
+		log.Println("Open() - Error: ", errc)
 	}
 	return
 }
@@ -240,9 +210,7 @@ func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 
 	node := fs.getNode(path, fh)
 	if nil == node {
-		log.Fatalln("Getattr() Error: nil node", path)
-		*stat = newNode(0, fh, uint32(fuse.S_IFREG|0444), 0, 0).stat
-		return 0 //-fuse.ENOENT
+		return -fuse.ENOENT
 	}
 
 	*stat = node.stat
@@ -251,23 +219,40 @@ func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 
 // Getxattr gets the extended file attributes
 func (fs *Nfsfs) Getxattr(path string, name string) (errc int, xattr []byte) {
+	log.Println("Getxattr() path: ", path, name)
 
 	defer fs.synchronize()()
 
 	_, _, node := fs.lookupNode(path, nil)
 
 	if node == nil {
-		log.Fatalln("Getxattr() Error: nil node")
+		log.Println("Getxattr() Error: nil node")
 		return -fuse.ENOENT, nil
 	}
 
 	xattr, ok := node.xattr[name]
 	if !ok {
-		log.Fatalln("Getxattr() Error: not 'ok'")
+		log.Println("Getxattr() Error: not 'ok'")
 		return -fuse.ENOATTR, nil
 	}
 
 	return 0, xattr
+}
+
+// Listxattr lists the extended attributes for the specified path
+func (fs *Nfsfs) Listxattr(path string, fill func(name string) bool) (errc int) {
+	fmt.Println("Listxattr() path: ", path)
+	defer fs.synchronize()()
+	_, _, node := fs.lookupNode(path, nil)
+	if nil == node {
+		return -fuse.ENOENT
+	}
+	for name := range node.xattr {
+		if !fill(name) {
+			return -fuse.ERANGE
+		}
+	}
+	return 0
 }
 
 // Truncate truncates the specified file
@@ -278,7 +263,7 @@ func (fs *Nfsfs) Truncate(path string, size int64, fh uint64) (errc int) {
 
 	node := fs.getNode(path, fh)
 	if nil == node {
-		log.Fatalln("Getxattr() - getNode(): node nil")
+		log.Println("Getxattr() - getNode(): node nil")
 		return -fuse.ENOENT
 	}
 
@@ -356,7 +341,7 @@ func calcOffsets(path string, node *Node, offset int64, buff []byte) (int64, int
 		return 0, 0
 	}
 	if offset == 0 {
-		log.Println("Read() - start:\t\t", offset, endoffset, endoffset-offset, path)
+		log.Println("Read() - start:\t\t", offset, endoffset, endoffset-offset, path, len(node.cache.byteRanges))
 	}
 	if endoffset == node.stat.Size {
 		log.Println("Read() - end:  \t\t", offset, endoffset, endoffset-offset, path)
@@ -366,7 +351,7 @@ func calcOffsets(path string, node *Node, offset int64, buff []byte) (int64, int
 
 // Release releases the specified file handle
 func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
-	// log.Println("Release() path: ", path, fh)
+	log.Println("Release() path: ", path, fh)
 
 	defer fs.synchronize()()
 	return fs.closeNode(path)
@@ -374,7 +359,7 @@ func (fs *Nfsfs) Release(path string, fh uint64) (errc int) {
 
 // Opendir opens the specified directory/node
 func (fs *Nfsfs) Opendir(path string) (errc int, fh uint64) {
-	// log.Println("Opendir() path: ", path)
+	log.Println("Opendir() path: ", path)
 
 	defer fs.synchronize()()
 	return fs.openNode(path, true)
@@ -391,63 +376,55 @@ func (fs *Nfsfs) Readdir(path string,
 
 	return fs.populateDir(path, fill)
 }
-
-func (fs *Nfsfs) populateDir(path string,
+func (fs *Nfsfs) populateDir(filepath string,
 	fill func(name string, stat *fuse.Stat_t, ofst int64) bool) (errc int) {
 
-	items, err := nfstarget.ReadDirPlus(path)
-	if err != nil {
-		log.Fatalln("Readdir error - ReadDirPlus():", err.Error())
-		// try reconnecting
-		err := connectNFS()
-		if err != nil {
-			log.Fatalln("Readdir error - ConnectNFS():", err.Error())
-			return -fuse.ENOENT
-		}
+	fullpath := path.Join(*nfsmount, filepath)
+	log.Println("populateDir() path: ", fullpath)
 
-		items, err = nfstarget.ReadDirPlus(path)
-		if err != nil {
-			log.Fatalln("Readdir error - ReadDirPlus():", err.Error())
-			return -fuse.ENOENT
-		}
+	fileinfos, err := ioutil.ReadDir(fullpath)
+	if err != nil {
+		log.Println("Readdir error ioutil.ReadDir:", err.Error())
+		return -fuse.ENOENT
 	}
 
-	node := fs.openmap[path]
+	node := fs.openmap[filepath]
 
 	if node == nil {
+		log.Println("populateDir() nil node: ", filepath)
 		node = fs.root
 	}
 
-	for _, item := range items {
-		// if filepath.Ext(item.FileName) == ".inf" {
-		// 	continue
-		// }
-		fs.ino++
-		mode := uint32(item.Attr.Attr.Mode())
-		if item.Attr.Attr.IsDir() {
-			mode = fuse.S_IFDIR | (mode & 07777)
+	for _, fi := range fileinfos {
+		// fs.ino++
+		mode := uint32(fi.Mode())
+		if fi.IsDir() {
+			mode = fuse.S_IFDIR | (mode & 00555)
 		} else {
-			mode = fuse.S_IFREG | (mode & 0444)
+			mode = fuse.S_IFREG | 00555
 		}
 
-		child := newNode(0, fs.ino, mode, item.Attr.Attr.UID, item.Attr.Attr.GID)
-		child.stat.Size = item.Attr.Attr.Size()
+		// getFileAttributes is os-dependent. Returns 0s on Windows
+		ino, uid, gid := getFileAttributes(fi.Sys())
+		// log.Println("populateDir() file: ", fi.Name(), mode, ino, uid, gid)
+
+		child := newNode(0, ino, mode, uid, gid)
+		child.stat.Size = fi.Size()
 
 		if fill != nil {
-			fill(item.FileName, &child.stat, 0)
+			fill(fi.Name(), &child.stat, 0)
 		}
 
-		if node.children[item.FileName] == nil {
-			node.children[item.FileName] = child
+		if node.children[fi.Name()] == nil {
+			node.children[fi.Name()] = child
 		}
 	}
-
 	return 0
 }
 
 // Releasedir releases the specified directory by closing the node
 func (fs *Nfsfs) Releasedir(path string, fh uint64) (errc int) {
-	// log.Println("Releasedir() path: ", path)
+	log.Println("Releasedir() path: ", path)
 	defer fs.synchronize()()
 	return fs.closeNode(path)
 }
@@ -496,7 +473,7 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 
 			//TODO: Check deadlock possibility
 			cachedNode.node.cache.lock.Lock()
-			cachedNode.node.cache.byteRanges = []ByteRange{}
+			cachedNode.node.cache.byteRanges = nil
 			cachedNode.node.cache.lock.Unlock()
 
 			cachedNode.node.lock.Lock()
@@ -516,21 +493,13 @@ func evictModifiedFilesFromCache(getFileModTime func(path string) time.Time) {
 	// log.Println("CacheEviction. Len after:", len(cachedNodes))
 }
 
-func getFileModTimeFromNFS(path string) time.Time {
+func getFileModTimeFromNFS(filepath string) time.Time {
 
-	file, _, err := nfstarget.Lookup(path)
+	fullpath := path.Join(*nfsmount, filepath)
+
+	file, err := os.Stat(fullpath)
 	if err != nil {
-		log.Fatalln("NFS Lookup error. Will try reconnecting:", path, err.Error())
-		// try reconnecting
-		err := connectNFS()
-		if err != nil {
-			log.Fatalln("ConnectNFS():", err.Error())
-		}
-
-		file, _, err = nfstarget.Lookup(path)
-		if err != nil {
-			log.Fatalln("NFS Lookup error x2 - giving up.", path, err.Error())
-		}
+		log.Println("getFileModTimeFromNFS() error for path:", filepath, err.Error())
 	}
 	return file.ModTime()
 }
@@ -547,7 +516,7 @@ func tryRemoteCache(path string, fh uint64,
 
 	client, err := destConnection(address)
 	if err != nil {
-		log.Fatalln("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
+		log.Println("Error creating destination connection to remote host: .", address, "\n\t", err.Error())
 		return 0
 	}
 	defer client.Close()
@@ -580,7 +549,7 @@ func getRemoteCacheData(filepath string, fh uint64, node *Node,
 
 	err := rpcCall(getFileDataHandlerName, request, response)
 	if err != nil {
-		log.Fatalln("Error calling tryRemoteCache: ", filepath, err.Error())
+		log.Println("Error calling tryRemoteCache: ", filepath, err.Error())
 	}
 
 	if response.NumbBytes > 0 {
@@ -592,47 +561,6 @@ func getRemoteCacheData(filepath string, fh uint64, node *Node,
 	}
 	return response.NumbBytes
 
-}
-
-// readFileFromNFS reads the specified file from the NFS server
-// Should only be called once per file (assuming we have sufficient memory)
-func readFileFromNFS(path string, node *Node, buff []byte, offset, endoffset int64) (numb int) {
-
-	file, err := nfstarget.Open(path)
-	if err != nil {
-		log.Fatalln("Read - Open Error: ", err.Error())
-		return 0
-	}
-
-	newoffset := offset
-	for {
-		_, err = file.Seek(newoffset, io.SeekStart)
-		if err != nil {
-			log.Fatalln("Read - Seek Error: ", err.Error())
-			return 0
-		}
-
-		bytesread, err := file.Read(buff[numb:])
-
-		if err == io.EOF {
-			numb += bytesread
-			break
-		}
-
-		if err != nil {
-			//TODO: Error handling - what should we do here?
-			log.Fatalln("Read - Error: ", err.Error())
-			return 0
-		}
-
-		numb += bytesread
-		newoffset += int64(bytesread)
-
-		if numb == len(buff) {
-			break
-		}
-	}
-	return numb
 }
 
 // readFileFromLocalNFSMount reads the specified file from the local NFS mount
@@ -680,7 +608,7 @@ func broadcastCachedFile(filepath string, fh uint64) {
 
 		client, err := destConnection(address)
 		if err != nil {
-			log.Fatalln("broadcastCachedFile() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
+			log.Println("broadcastCachedFile() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
 			os.Exit(2)
 		}
 		defer client.Close()
@@ -690,7 +618,7 @@ func broadcastCachedFile(filepath string, fh uint64) {
 		err = client.Call(fileCachedHandlerName, request, response)
 
 		if err != nil {
-			log.Fatalln("broadcastCachedFile() - Error calling FileCachedEvent: ", filepath, err.Error())
+			log.Println("broadcastCachedFile() - Error calling FileCachedEvent: ", filepath, err.Error())
 		}
 	}
 }
@@ -704,7 +632,7 @@ func broadcastCachedFileRemoved(filepath string) {
 
 		client, err := destConnection(address)
 		if err != nil {
-			log.Fatalln("broadcastCachedFileRemoved() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
+			log.Println("broadcastCachedFileRemoved() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
 			os.Exit(2)
 		}
 		defer client.Close()
@@ -714,7 +642,7 @@ func broadcastCachedFileRemoved(filepath string) {
 		err = client.Call(fileRemovedFromCacheHandlerName, request, response)
 
 		if err != nil {
-			log.Fatalln("broadcastCachedFileRemoved() - Error calling FileRemovedFromCacheEvent: ", filepath, err.Error())
+			log.Println("broadcastCachedFileRemoved() - Error calling FileRemovedFromCacheEvent: ", filepath, err.Error())
 		}
 	}
 }
@@ -729,6 +657,7 @@ func destConnection(address string) (*rpc.Client, error) {
 }
 
 func (fs *Nfsfs) getNode(path string, fh uint64) *Node {
+	// log.Println("getNode() -", path)
 
 	if fh == ^uint64(0) {
 		_, _, node := fs.lookupNode(path, nil)
@@ -739,21 +668,22 @@ func (fs *Nfsfs) getNode(path string, fh uint64) *Node {
 }
 
 func (fs *Nfsfs) openNode(path string, dir bool) (errc int, fh uint64) {
+	log.Println("openNode() -", path)
 
 	_, _, node := fs.lookupNode(path, nil)
 
 	if node == nil {
-		log.Fatalln("openNode() - Node nil", path)
+		log.Println("openNode() - Node nil", path)
 		return -fuse.ENOENT, ^uint64(0)
 	}
 
 	if !dir && node.stat.Mode&fuse.S_IFMT == fuse.S_IFDIR {
-		log.Fatalln("openNode() - Node is meant to be file but isn't (is dir)", path)
+		log.Println("openNode() - Node is meant to be file but isn't (is dir)", path)
 		return -fuse.EISDIR, ^uint64(0)
 	}
 
 	if dir && node.stat.Mode&fuse.S_IFMT != fuse.S_IFDIR {
-		log.Fatalln("openNode() - Node is meant to be dir but isn't (is file)", path)
+		log.Println("openNode() - Node is meant to be dir but isn't (is file)", path)
 		return -fuse.ENOTDIR, ^uint64(0)
 	}
 
@@ -765,18 +695,20 @@ func (fs *Nfsfs) openNode(path string, dir bool) (errc int, fh uint64) {
 }
 
 func (fs *Nfsfs) closeNode(path string) int {
+	// log.Println("closeNode() -", path)
 	node := fs.openmap[path]
 	node.opencnt--
 	return 0
 }
 
-func (fs *Nfsfs) lookupNode(path string, ancestor *Node) (parent *Node, name string, node *Node) {
+func (fs *Nfsfs) lookupNode(filepath string, ancestor *Node) (parent *Node, name string, node *Node) {
+	// log.Println("lookupNode() -", filepath)
 
 	parent = fs.root
 	node = fs.root
 	name = ""
 
-	for _, c := range strings.Split(path, "/") {
+	for _, c := range strings.Split(filepath, "/") {
 		if c != "" {
 			if len(c) > 255 {
 				log.Panicln(fuse.Error(-fuse.ENAMETOOLONG))
@@ -785,8 +717,9 @@ func (fs *Nfsfs) lookupNode(path string, ancestor *Node) (parent *Node, name str
 			node = node.children[c]
 
 			if node == nil {
-				// log.Println("lookupNode() node nil, calling populateDir()", path, c)
-				_ = fs.populateDir("/", nil)
+				log.Println("lookupNode() node nil, calling populateDir()", path.Dir(filepath), filepath, c)
+				_, _ = fs.openNode(path.Dir(filepath), true)
+				_ = fs.populateDir(path.Dir(filepath), nil)
 				node = parent.children[c]
 			}
 
@@ -816,7 +749,7 @@ func newNode(dev uint64, ino uint64, mode uint32, uid uint32, gid uint32) *Node 
 			Birthtim: timenow,
 			Flags:    0,
 		},
-		cache: FileCache{byteRanges: []ByteRange{}},
+		cache: FileCache{},
 	}
 
 	if node.stat.Mode&fuse.S_IFMT == fuse.S_IFDIR {

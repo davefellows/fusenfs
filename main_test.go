@@ -1,6 +1,13 @@
 package main
 
 import (
+	"bufio"
+	"fmt"
+	"log"
+	"os"
+	"os/user"
+	"path"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -9,7 +16,7 @@ func TestReadCallsLocalCache(t *testing.T) {
 
 	fs := newfs()
 	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 5})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 5})
 	node.data = []byte{0, 1, 2, 3, 4}
 	node.stat.Size = 5
 
@@ -31,7 +38,7 @@ func TestReadWithOffsetCallsLocalCache(t *testing.T) {
 
 	fs := newfs()
 	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 10})
 	node.data = []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	node.stat.Size = 10
 
@@ -61,7 +68,7 @@ func TestReadWithRemoteCacheFetchOverRPC(t *testing.T) {
 	remoteCachedFiles[filepath] = "localhost"
 
 	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 5})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 5})
 	node.data = []byte{0, 1, 2, 3, 4}
 	node.stat.Size = 5
 
@@ -83,7 +90,7 @@ func TestReadWithRemoteCacheFetchOverRPC(t *testing.T) {
 func TestCanFetchFromLocalCache(t *testing.T) {
 
 	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 5})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 5})
 
 	buff := make([]byte, 5)
 	node.data = []byte{0, 1, 2, 3, 4}
@@ -107,7 +114,7 @@ func TestCanFetchFromLocalCache(t *testing.T) {
 func TestCanExpandLocalCacheHigh(t *testing.T) {
 
 	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 5})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 5})
 
 	buff := make([]byte, 1)
 	node.data = buff
@@ -117,8 +124,8 @@ func TestCanExpandLocalCacheHigh(t *testing.T) {
 		t.Error("newCacheItemRequired should be false")
 	}
 
-	if node.cache.byteRanges[0].high != 5 {
-		t.Error("ByteRange high should 5, not: ", node.cache.byteRanges[0].high)
+	if node.cache.byteRanges[0].high != 10 {
+		t.Error("ByteRange high should be 10, not: ", node.cache.byteRanges[0].high)
 	}
 
 	if numb != 0 {
@@ -129,7 +136,7 @@ func TestCanExpandLocalCacheHigh(t *testing.T) {
 func TestCanExpandLocalCacheLow(t *testing.T) {
 
 	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 5, high: 10})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 5, high: 10})
 
 	buff := make([]byte, 1)
 	node.data = buff
@@ -139,8 +146,8 @@ func TestCanExpandLocalCacheLow(t *testing.T) {
 		t.Error("newCacheItemRequired should be false")
 	}
 
-	if node.cache.byteRanges[0].low != 5 {
-		t.Error("ByteRange high should 5, not: ", node.cache.byteRanges[0].low)
+	if node.cache.byteRanges[0].low != 0 {
+		t.Error("ByteRange high should be 0, not: ", node.cache.byteRanges[0].low)
 	}
 
 	if numb != 0 {
@@ -150,9 +157,9 @@ func TestCanExpandLocalCacheLow(t *testing.T) {
 
 func TestReduceCache(t *testing.T) {
 	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 10, high: 20})
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 20, high: 30})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 10})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 10, high: 20})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 20, high: 30})
 
 	reduceFileCache(node, "")
 
@@ -170,9 +177,9 @@ func TestReduceCache(t *testing.T) {
 func TestReduceCacheOutOfOrder(t *testing.T) {
 	node := createTestNode()
 	// byte ranges out of order
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 10, high: 20})
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 20, high: 30})
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 10, high: 20})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 20, high: 30})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 10})
 
 	reduceFileCache(node, "")
 
@@ -190,14 +197,14 @@ func TestReduceCacheOutOfOrder(t *testing.T) {
 func TestReduceCacheOutOfOrderWithGaps(t *testing.T) {
 	node := createTestNode()
 	// byte ranges out of order
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 10, high: 20})
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 20, high: 30})
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 0, high: 10})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 10, high: 20})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 20, high: 30})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 10})
 	// Gap
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 40, high: 50})
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 45, high: 60})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 40, high: 50})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 45, high: 60})
 	// Gap
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: 61, high: 70})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 61, high: 70})
 
 	reduceFileCache(node, "")
 
@@ -313,7 +320,7 @@ func TestMemoryLimit(t *testing.T) {
 		CachedNode{node: nodes[2], lastAccessed: time.Now()},
 	}
 
-	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved.cache.byteRanges = []*ByteRange{&ByteRange{}}
 	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
 
 	cachedNodes = cacheNodes
@@ -344,7 +351,7 @@ func TestMemoryLimitWithModifiedNode(t *testing.T) {
 	nodes[0].cache.cachedNode.lastAccessed = time.Now()
 	nodes[1].cache.cachedNode.lastAccessed = time.Now()
 
-	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved.cache.byteRanges = []*ByteRange{&ByteRange{}}
 	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
 
 	cachedNodes = cacheNodes
@@ -391,7 +398,7 @@ func TestEvictModifiedFileFromCache(t *testing.T) {
 		CachedNode{path: "file.gos", node: nodes[2], timeCached: time.Now()},
 	}
 
-	nodeThatShouldBeRemoved.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved.cache.byteRanges = []*ByteRange{&ByteRange{}}
 	nodeThatShouldBeRemoved.data = []byte{0, 1, 2}
 
 	cachedNodes = cacheNodes
@@ -435,11 +442,11 @@ func TestEvictMultipleModifiedFilesFromCache(t *testing.T) {
 		CachedNode{path: "file.gos", node: nodes[4], timeCached: time.Now()},
 	}
 
-	nodeThatShouldBeRemoved1.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved1.cache.byteRanges = []*ByteRange{&ByteRange{}}
 	nodeThatShouldBeRemoved1.data = []byte{0, 1, 2}
-	nodeThatShouldBeRemoved2.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved2.cache.byteRanges = []*ByteRange{&ByteRange{}}
 	nodeThatShouldBeRemoved2.data = []byte{0, 1, 2}
-	nodeThatShouldBeRemoved3.cache.byteRanges = []ByteRange{ByteRange{}}
+	nodeThatShouldBeRemoved3.cache.byteRanges = []*ByteRange{&ByteRange{}}
 	nodeThatShouldBeRemoved3.data = []byte{0, 1, 2}
 
 	cachedNodes = cacheNodes
@@ -472,6 +479,73 @@ func TestEvictMultipleModifiedFilesFromCache(t *testing.T) {
 
 func TestPopulateDir(t *testing.T) {
 	//TODO: Need to test this!
+	usr, err := user.Current()
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	basedir := path.Join(usr.HomeDir, "testdir")
+	*nfsmount = basedir
+	createTestData(basedir, 2)
+
+	nfsfs = newfs()
+
+	nfsfs.populateDir("/", nil)
+
+	if len(nfsfs.root.children) != 3 {
+		t.Error("fs.root.children shouldn't be empty. Len:", len(nfsfs.root.children))
+	}
+
+	subdir1node := nfsfs.root.children["1"]
+	if subdir1node == nil {
+		t.Error("sub dir '1' node shouldn't be nil")
+	}
+	subdir1 := path.Join(basedir, "1")
+	errc, fh := nfsfs.Opendir("/1")
+	if errc != 0 {
+		t.Error("Error opening directory:", subdir1, fh, errc)
+	}
+	nfsfs.populateDir("/1", nil)
+
+	subdir2node := subdir1node.children["2"]
+	if subdir2node == nil {
+		t.Error("sub dir '2' node shouldn't be nil")
+	}
+
+	os.RemoveAll(basedir)
+}
+
+func createTestData(filepath string, subdirs int) {
+	createDir(filepath)
+	createTestFile(filepath + "\\1.file")
+	createTestFile(filepath + "\\2.file")
+
+	for i := 1; i <= subdirs; i++ {
+		filepath = path.Join(filepath, strconv.Itoa(i))
+		createDir(filepath)
+		createTestFile(filepath + "\\1.file")
+		createTestFile(filepath + "\\2.file")
+	}
+}
+
+func createDir(path string) {
+	err := os.MkdirAll(path, os.ModePerm)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func createTestFile(path string) {
+	fileHandle, err := os.Create(path)
+	if err != nil {
+		panic(err)
+	}
+
+	defer fileHandle.Close()
+
+	writer := bufio.NewWriter(fileHandle)
+	fmt.Fprintln(writer, "Test data")
+	writer.Flush()
 }
 
 func mockRPCCall(method string, args interface{}, reply interface{}) error {

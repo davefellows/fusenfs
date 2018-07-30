@@ -17,7 +17,7 @@ func createLocalCacheDir() (cachePath string) {
 	cachePath = path.Join(usr.HomeDir, cacheDir)
 	// create cache dir if doesn't already exist
 	//TODO: reduce permissions to cache directory
-	err = os.MkdirAll(cachePath, 0777)
+	err = os.MkdirAll(cachePath, 0500)
 	if err != nil {
 		log.Panicln(err)
 	}

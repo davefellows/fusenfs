@@ -52,7 +52,7 @@ func updateCacheMetadataForNode(path string, node *Node, offset, endoffset int64
 		go reduceFileCache(node, path)
 	}
 	node.cache.lock.Lock()
-	node.cache.byteRanges = append(node.cache.byteRanges, ByteRange{low: offset, high: endoffset})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: offset, high: endoffset})
 	node.cache.lock.Unlock()
 }
 
@@ -60,7 +60,7 @@ func updateCacheMetadataForNode(path string, node *Node, offset, endoffset int64
 // Should end up with only a single byte range per file.
 func reduceFileCache(node *Node, filepath string) {
 
-	var newByteRanges []ByteRange
+	var newByteRanges []*ByteRange
 	var lowest, highest int64
 
 	node.cache.lock.Lock()
@@ -82,14 +82,14 @@ func reduceFileCache(node *Node, filepath string) {
 			continue
 		}
 		// 3. If neither of the above then we need to keep this range
-		newByteRanges = append(newByteRanges, ByteRange{low: lowest, high: highest})
+		newByteRanges = append(newByteRanges, &ByteRange{low: lowest, high: highest})
 		lowest = max(lowest, br.low)
 		highest = max(highest, br.high)
 	}
 
 	// if we've made changes then append and update
 	if highest != 0 {
-		newByteRanges = append(newByteRanges, ByteRange{low: lowest, high: highest})
+		newByteRanges = append(newByteRanges, &ByteRange{low: lowest, high: highest})
 
 		node.cache.lock.Lock()
 		node.cache.byteRanges = newByteRanges
@@ -120,12 +120,14 @@ func fetchMemCacheData(path string, node *Node, offset, endoffset int64,
 		}
 
 		if offset >= br.low && offset < br.high {
+			log.Println("fetchMemCacheData() - extend cache up", offset, endoffset, br.low, br.high)
 			// extend cache
 			br.high = endoffset
 			newCacheItemRequired = false
 		}
 
 		if endoffset < br.high && endoffset > br.low {
+			log.Println("fetchMemCacheData() - extend cache down", offset, endoffset, br.low, br.high)
 			// extend lower end of cache
 			br.low = offset
 			newCacheItemRequired = false
@@ -169,7 +171,8 @@ func freeMemory(memToFreeMB int) {
 		count++
 
 		cachedNodes[i].node.cache.lock.Lock()
-		cachedNodes[i].node.cache.byteRanges = []ByteRange{}
+		//TODO: Check this change still frees memory
+		cachedNodes[i].node.cache.byteRanges = nil
 		cachedNodes[i].node.cache.lock.Unlock()
 		cachedNodes[i].node.data = []byte{}
 
