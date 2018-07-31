@@ -10,10 +10,6 @@ import (
 // updateLocalCache adds the new byte range to the in memory cache
 func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff []byte, offset, endoffset int64) {
 
-	if newByteRangeRequired {
-		updateCacheMetadataForNode(path, node, offset, endoffset)
-	}
-
 	if int64(len(node.data)) < endoffset {
 		// Resize for the entire file so we don't resize every time
 		node.data = resize(node.data, node.stat.Size, false)
@@ -30,6 +26,11 @@ func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff [
 	}
 
 	copy(node.data[offset:endoffset], buff)
+
+	if newByteRangeRequired {
+		updateCacheMetadataForNode(path, node, offset, endoffset)
+	}
+
 }
 
 func updateCacheMetadataForNode(path string, node *Node, offset, endoffset int64) {
@@ -49,11 +50,11 @@ func updateCacheMetadataForNode(path string, node *Node, offset, endoffset int64
 	} else {
 		// Update last access time so we evict items with the oldest previous access
 		node.cache.cachedNode.lastAccessed = time.Now()
-		go reduceFileCache(node, path)
 	}
 	node.cache.lock.Lock()
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: offset, high: endoffset})
 	node.cache.lock.Unlock()
+	go reduceFileCache(node, path)
 }
 
 // reduceFileCache merges byte ranges where possible.
@@ -68,8 +69,9 @@ func reduceFileCache(node *Node, filepath string) {
 		return node.cache.byteRanges[i].low < node.cache.byteRanges[j].low
 	})
 	node.cache.lock.Unlock()
-
+	var count int64
 	for _, br := range node.cache.byteRanges {
+		count += br.high - br.low
 		// 1. range extends the previous one above
 		if br.low <= highest && br.high > highest {
 			highest = br.high
@@ -83,6 +85,8 @@ func reduceFileCache(node *Node, filepath string) {
 		}
 		// 3. If neither of the above then we need to keep this range
 		newByteRanges = append(newByteRanges, &ByteRange{low: lowest, high: highest})
+		// This is max() rather than min() as to get here we must have gapped up
+		// Alternatively, could probably just set lowest to br.low (TODO: test)
 		lowest = max(lowest, br.low)
 		highest = max(highest, br.high)
 	}
@@ -95,6 +99,8 @@ func reduceFileCache(node *Node, filepath string) {
 		node.cache.byteRanges = newByteRanges
 		node.cache.lock.Unlock()
 	}
+	log.Println("reduceFileCache() - ", len(node.cache.byteRanges), lowest, highest, highest-lowest, count, node.stat.Size)
+	//TODO: Need a more exact count!
 	if highest-lowest == node.stat.Size {
 		// log.Println("reduceFileCache CACHED file", filepath)
 		broadcastCachedFile(filepath, node.stat.Ino)
@@ -187,4 +193,11 @@ func freeMemory(memToFreeMB int) {
 
 	// Call GC
 	runtime.GC()
+}
+
+func max(a, b int64) int64 {
+	if a > b {
+		return a
+	}
+	return b
 }

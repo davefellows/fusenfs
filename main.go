@@ -45,6 +45,7 @@ var (
 
 	remoteServers     []string
 	remoteCachedFiles map[string]string
+	remoteCacheLock   sync.Mutex
 
 	perffile *os.File
 )
@@ -134,7 +135,6 @@ func main() {
 	}
 
 	log.Println("NFS mount:", *nfsmount)
-	log.Println("Mount point:", *mntpoint)
 	log.Println("Remote servers:", len(remoteServers), remoteServers)
 	log.Println("Remote port:", *rpcPort)
 	log.Println("Memory limit:", *memLimit)
@@ -160,6 +160,7 @@ func main() {
 
 	nfsfs = newfs()
 	host := fuse.NewFileSystemHost(nfsfs)
+	log.Println("File system mounted at:", *mntpoint)
 	host.Mount(*mntpoint, []string{})
 	defer host.Unmount()
 }
@@ -219,7 +220,7 @@ func (fs *Nfsfs) Getattr(path string, stat *fuse.Stat_t, fh uint64) (errc int) {
 
 // Getxattr gets the extended file attributes
 func (fs *Nfsfs) Getxattr(path string, name string) (errc int, xattr []byte) {
-	log.Println("Getxattr() path: ", path, name)
+	// log.Println("Getxattr() path: ", path, name)
 
 	defer fs.synchronize()()
 
@@ -232,7 +233,7 @@ func (fs *Nfsfs) Getxattr(path string, name string) (errc int, xattr []byte) {
 
 	xattr, ok := node.xattr[name]
 	if !ok {
-		log.Println("Getxattr() Error: not 'ok'")
+		log.Println("Getxattr() Error: not 'ok'", name)
 		return -fuse.ENOATTR, nil
 	}
 
@@ -523,13 +524,8 @@ func tryRemoteCache(path string, fh uint64,
 
 	numb = getRemoteCacheData(path, fh, node, offset, endoffset, buff, client.Call)
 
-	if numb > 0 {
-		if len(node.cache.byteRanges) > 1 {
-			go reduceFileCache(node, path)
-		}
-		if offset == 0 || endoffset == node.stat.Size {
-			log.Println("Read() - remote cache hit:  ", offset, endoffset, len(buff), path)
-		}
+	if numb > 0 && offset == 0 || endoffset == node.stat.Size {
+		log.Println("Read() - remote cache hit:  ", offset, endoffset, len(buff), path)
 	}
 	return
 }
@@ -609,7 +605,7 @@ func broadcastCachedFile(filepath string, fh uint64) {
 		client, err := destConnection(address)
 		if err != nil {
 			log.Println("broadcastCachedFile() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
-			os.Exit(2)
+			return
 		}
 		defer client.Close()
 
@@ -633,7 +629,7 @@ func broadcastCachedFileRemoved(filepath string) {
 		client, err := destConnection(address)
 		if err != nil {
 			log.Println("broadcastCachedFileRemoved() - Error creating destination connection to remote host: .", address, "\n\t", err.Error())
-			os.Exit(2)
+			return
 		}
 		defer client.Close()
 
@@ -718,6 +714,7 @@ func (fs *Nfsfs) lookupNode(filepath string, ancestor *Node) (parent *Node, name
 
 			if node == nil {
 				log.Println("lookupNode() node nil, calling populateDir()", path.Dir(filepath), filepath, c)
+				//TODO: Optimize this
 				_, _ = fs.openNode(path.Dir(filepath), true)
 				_ = fs.populateDir(path.Dir(filepath), nil)
 				node = parent.children[c]
@@ -799,9 +796,9 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 		return errors.New("a file path must be specified")
 	}
 
-	//TODO: decide  whether locking is required here.
-	// Probably not a big deal as stale reads are fine
+	remoteCacheLock.Lock()
 	remoteCachedFiles[req.Filepath] = req.Fromip
+	remoteCacheLock.Unlock()
 
 	log.Println("FileCachedEvent - file:", req.Filepath, req.Fh, len(remoteCachedFiles))
 
@@ -815,7 +812,9 @@ func (h *RPCHandler) FileRemovedFromCacheEvent(req CacheUpdateRequest, res *Cach
 		return errors.New("a file path must be specified")
 	}
 
+	remoteCacheLock.Lock()
 	delete(remoteCachedFiles, req.Filepath)
+	remoteCacheLock.Unlock()
 
 	log.Println("FileRemovedFromCacheEvent - file:", req.Filepath, req.Fh, len(remoteCachedFiles))
 
@@ -852,13 +851,6 @@ func getMemoryUsedMB() int {
 	var m runtime.MemStats
 	runtime.ReadMemStats(&m)
 	return int(m.Alloc / 1024 / 1024)
-}
-
-func max(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func bToMb(b int64) int {
