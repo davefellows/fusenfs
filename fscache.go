@@ -34,7 +34,7 @@ func deleteLocalCacheFilesIfModified(cachePath, nfsPath string, getFileModTime f
 
 	fileinfos, err := ioutil.ReadDir(cachePath)
 	if err != nil {
-		log.Println("deleteLocalCacheFilesIfModified() - error:", err.Error())
+		log.Println("deleteLocalCacheFilesIfModified() - error:", err)
 	}
 
 	for _, fi := range fileinfos {
@@ -53,7 +53,7 @@ func deleteLocalCacheFilesIfModified(cachePath, nfsPath string, getFileModTime f
 				log.Println("Removing file from local cache as NFS source modified.", fullpath)
 				err := os.Remove(fullpath)
 				if err != nil {
-					log.Println("Error deleting local cache file.", fullpath, err.Error())
+					log.Println("Error deleting local cache file.", fullpath, err)
 				}
 				removedFiles = append(removedFiles, fullpath)
 			}
@@ -71,7 +71,7 @@ func writeFileToFilesystem(filepath string, node *Node) {
 	// create cache dir if doesn't already exist
 	err := os.MkdirAll(path.Dir(newfile), 0700)
 	if err != nil {
-		log.Println("Error writing file to local cache. Path:", newfile, err.Error())
+		log.Println("Error writing file to local cache. Path:", newfile, err)
 	}
 
 	// open output file
@@ -83,13 +83,19 @@ func writeFileToFilesystem(filepath string, node *Node) {
 
 	defer func() {
 		if err = fout.Close(); err != nil {
-			log.Fatalln(err)
+			log.Println("Error closing fout.", err)
 		}
 	}()
 	w := bufio.NewWriter(fout)
-	if _, err := w.Write(node.data); err != nil {
+	if _, err = w.Write(node.data); err != nil {
 		log.Println("Error writing to local cache file.", err)
 	}
+	err = w.Flush()
+	if err != nil {
+		log.Println("Error flushing bufio Writer.", err)
+		return
+	}
+
 }
 
 func removeFileFromFSCache(filepath string) {

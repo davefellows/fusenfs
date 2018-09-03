@@ -481,7 +481,7 @@ func TestEvictMultipleModifiedFilesFromCache(t *testing.T) {
 func TestDeleteLocalCacheFilesIfModified(t *testing.T) {
 	usr, err := user.Current()
 	if err != nil {
-		log.Fatalln(err)
+		t.Error(err)
 	}
 
 	basedir := path.Join(usr.HomeDir, "testcachedir")

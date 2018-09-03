@@ -46,8 +46,6 @@ var (
 	remoteServers     []string
 	remoteCachedFiles map[string]string
 	remoteCacheLock   sync.Mutex
-
-	perffile *os.File
 )
 
 // Nfsfs is the main file system structure
@@ -805,7 +803,7 @@ func (h *RPCHandler) FileCachedEvent(req CacheUpdateRequest, res *CacheUpdateRes
 	return
 }
 
-// FileCachedEvent adds/updates the remoteCachedFiles map
+// FileRemovedFromCacheEvent adds/updates the remoteCachedFiles map
 func (h *RPCHandler) FileRemovedFromCacheEvent(req CacheUpdateRequest, res *CacheUpdateResponse) (err error) {
 
 	if req.Filepath == "" {
