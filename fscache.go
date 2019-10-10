@@ -5,27 +5,26 @@ import (
 	"io/ioutil"
 	"log"
 	"os"
-	"os/user"
 	"path"
 	"time"
 )
 
 func setupLocalFSCache(cacheDir string) (cachePath string) {
 	// get the user's current home directory
-	usr, err := user.Current()
-	if err != nil {
-		log.Fatalln(err)
-	}
-	cachePath = path.Join(usr.HomeDir, cacheDir)
+	// usr, err := user.Current()
+	// if err != nil {
+	// 	log.Fatalln(err)
+	// }
+	cachePath = path.Join("/mnt/resource/fusenfs/", cacheDir)
 	// create cache dir if doesn't already exist
-	err = os.MkdirAll(cachePath, 0700)
+	err := os.MkdirAll(cachePath, 0777)
 	if err != nil {
 		log.Panicln(err)
 	}
 	log.Println("Created local filesystem cache dir:", cachePath)
 
 	// remove changed files
-	_ = deleteLocalCacheFilesIfModified(cachePath, *nfsmount, getFileModTimeFromNFS)
+	go deleteLocalCacheFilesIfModified(cachePath, *nfsmount, getFileModTimeFromNFS)
 
 	return cachePath
 }
@@ -43,6 +42,7 @@ func deleteLocalCacheFilesIfModified(cachePath, nfsPath string, getFileModTime f
 
 		if fi.IsDir() {
 			// recursively call for any subdirectories
+			//TODO: Do we need to know the removedFiles here...?
 			files := deleteLocalCacheFilesIfModified(fullpath, nfsfullpath, getFileModTime)
 			removedFiles = append(removedFiles, files...)
 		} else {
@@ -131,6 +131,7 @@ func fetchLocalFSCacheData(filepath string, node *Node, offset, endoffset int64,
 	}
 
 	reader := bufio.NewReader(file)
+	//TODO: there could be an error here if the number of bytes read is less than the length of the buffer!
 	numBytes, err = reader.Read(buff)
 	if err != nil {
 		log.Println("Error reading from local cache file.", filepath, offset, err)
