@@ -4,7 +4,7 @@
 Requires Golang 1.10 to build the cgofuse dependency.
 
 *Linux*
-* Required dependencies: libfuse-dev, gcc
+* Required dependencies: libfuse-dev (Ubuntu) or fuse-devel (CentOS/Fedora), gcc
 
 *Windows*
 * Required dependencies: [WinFSP](https://github.com/billziss-gh/winfsp)
