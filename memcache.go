@@ -7,11 +7,11 @@ import (
 	"time"
 )
 
-// updateLocalCache adds the new byte range to the in memory cache
-func updateLocalCache(newByteRangeRequired bool, path string, node *Node, buff []byte, offset, endoffset int64) {
+// updateInMemoryCache adds the new byte range to the in memory cache
+func updateInMemoryCache(newByteRangeRequired bool, path string, node *Node, buff []byte, offset, endoffset int64) {
 
 	if int64(len(node.data)) < endoffset {
-		// Resize for the entire file so we don't resize every time
+		// Resize for the entire file so we don't resize every time which ends up expensive
 		node.data = resize(node.data, node.stat.Size, false)
 	}
 
@@ -54,22 +54,26 @@ func updateCacheMetadataForNode(path string, node *Node, offset, endoffset int64
 	node.cache.lock.Lock()
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: offset, high: endoffset})
 	node.cache.lock.Unlock()
+
 	go reduceFileCache(node, path)
 }
 
 // reduceFileCache merges byte ranges where possible.
-// Should end up with only a single byte range per file.
+// Should end up with only a single byte range per file (assuming client app is eventually reading all data).
+// Important to note when determining contiguity; byte ranges are inclusive
 func reduceFileCache(node *Node, filepath string) {
 
 	var newByteRanges []*ByteRange
 	var lowest, highest int64
 
+	// sort the byte ranges slice first so we can see which ranges are contiguous
 	node.cache.lock.Lock()
 	sort.Slice(node.cache.byteRanges, func(i, j int) bool {
 		return node.cache.byteRanges[i].low < node.cache.byteRanges[j].low
 	})
-	node.cache.lock.Unlock()
+
 	var count int64
+
 	for _, br := range node.cache.byteRanges {
 		// 1. range extends the previous one above
 		if br.low <= highest && br.high > highest {
@@ -82,12 +86,17 @@ func reduceFileCache(node *Node, filepath string) {
 			lowest = br.low
 			continue
 		}
-		// 3. If neither of the above then we need to keep this range
+
+		if br.high <= highest {
+			continue
+		}
+
+		// 3. If neither of the above then we need to keep the prior range
 		newByteRanges = append(newByteRanges, &ByteRange{low: lowest, high: highest})
 		count += highest - lowest
 
-		// This is max() rather than min() as to get here we must have gapped up
-		// Alternatively, could probably just set lowest to br.low (TODO: test)
+		// This is max() rather than min() as to get here we must have gapped up (i.e. missing byte range)
+		// Alternatively, should be able to just set lowest to br.low (TODO: need to test)
 		lowest = max(lowest, br.low)
 		highest = max(highest, br.high)
 	}
@@ -97,12 +106,12 @@ func reduceFileCache(node *Node, filepath string) {
 		newByteRanges = append(newByteRanges, &ByteRange{low: lowest, high: highest})
 		count += highest - lowest
 
-		node.cache.lock.Lock()
 		node.cache.byteRanges = newByteRanges
-		node.cache.lock.Unlock()
 	}
-	log.Println("reduceFileCache() - ", len(node.cache.byteRanges), lowest, highest, highest-lowest, count, node.stat.Size)
-	
+	node.cache.lock.Unlock()
+
+	log.Println("reduceFileCache() - ", len(node.cache.byteRanges), lowest, highest, highest-lowest, count, node.stat.Size, filepath)
+
 	if highest-lowest == node.stat.Size {
 		// log.Println("reduceFileCache CACHED file", filepath)
 		broadcastCachedFile(filepath, node.stat.Ino)
@@ -114,8 +123,7 @@ func reduceFileCache(node *Node, filepath string) {
 
 // fetchLocalCacheData scans the in memory cache for the
 // file and requested byte range. Copies to buff if found.
-func fetchMemCacheData(path string, node *Node, offset, endoffset int64,
-	buff []byte) (numBytes int, newCacheItemRequired bool) {
+func fetchMemCacheData(path string, node *Node, offset, endoffset int64, buff []byte) (numBytes int, newCacheItemRequired bool) {
 
 	cacheHit := false
 	newCacheItemRequired = true
@@ -128,14 +136,14 @@ func fetchMemCacheData(path string, node *Node, offset, endoffset int64,
 		}
 
 		if offset >= br.low && offset < br.high {
-			log.Println("fetchMemCacheData() - extend cache up", offset, endoffset, br.low, br.high)
+			log.Println("fetchMemCacheData() - extend cache up", offset, endoffset, br.low, br.high, path)
 			// extend cache
 			br.high = endoffset
 			newCacheItemRequired = false
 		}
 
 		if endoffset < br.high && endoffset > br.low {
-			log.Println("fetchMemCacheData() - extend cache down", offset, endoffset, br.low, br.high)
+			log.Println("fetchMemCacheData() - extend cache down", offset, endoffset, br.low, br.high, path)
 			// extend lower end of cache
 			br.low = offset
 			newCacheItemRequired = false
@@ -147,10 +155,12 @@ func fetchMemCacheData(path string, node *Node, offset, endoffset int64,
 		copy(buff, node.data[offset:endoffset])
 		numBytes = int(endoffset - offset)
 
-		if len(node.cache.byteRanges) > 1 {
-			// log.Println("Reduce file cache:", path, len(node.cache.byteRanges))
-			go reduceFileCache(node, path)
-		}
+		//NOTE: Commenting this out as it's probably redundant... Need to test
+		//********************************************************************
+		// if len(node.cache.byteRanges) > 1 {
+		// 	// log.Println("Reduce file cache:", path, len(node.cache.byteRanges))
+		// 	go reduceFileCache(node, path, brChan, doneChan)
+		// }
 		if offset == 0 || endoffset == node.stat.Size {
 			log.Println("Read() - in-memory cache hit:", offset, endoffset, len(buff), path)
 		}
