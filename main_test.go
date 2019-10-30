@@ -59,35 +59,6 @@ func TestReadWithOffsetCallsLocalCache(t *testing.T) {
 
 }
 
-func TestReadWithRemoteCacheFetchOverRPC(t *testing.T) {
-
-	go setupRPCListener("5555")
-
-	remoteServers = []string{"localhost"}
-	filepath := "file"
-	remoteCachedFiles = make(map[string]string)
-	remoteCachedFiles[filepath] = "localhost"
-
-	node := createTestNode()
-	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 5})
-	node.data = []byte{0, 1, 2, 3, 4}
-	node.stat.Size = 5
-
-	buff := make([]byte, 5)
-
-	nfsfs = newfs()
-	nfsfs.root.children[filepath] = node
-	nfsfs.Open(filepath, 0)
-
-	tryRemoteCache(filepath, 1, node, 0, 5, buff)
-
-	for i := 0; i < 5; i++ {
-		if buff[i] != byte(i) {
-			t.Error("Invalid data returned from cache -", i, buff[i])
-		}
-	}
-}
-
 func TestCanFetchFromLocalCache(t *testing.T) {
 
 	node := createTestNode()
@@ -177,7 +148,7 @@ func TestReduceCache(t *testing.T) {
 
 func TestReduceCacheOutOfOrder(t *testing.T) {
 	node := createTestNode()
-	// byte ranges out of order
+	// byte ranges out of order and slight gap between
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 10, high: 20})
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 20, high: 30})
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 10})
@@ -185,7 +156,7 @@ func TestReduceCacheOutOfOrder(t *testing.T) {
 	reduceFileCache(node, "")
 
 	if len(node.cache.byteRanges) != 1 {
-		t.Error("Expected one byte range after reduction. Got", len(node.cache.byteRanges))
+		t.Error("Expected 3 byte range after reduction. Got", len(node.cache.byteRanges))
 	}
 
 	low := node.cache.byteRanges[0].low
@@ -194,6 +165,78 @@ func TestReduceCacheOutOfOrder(t *testing.T) {
 		t.Error("Expected low=0, high=30. Got", low, high)
 	}
 }
+
+func TestReduceCacheOutOfOrderWithGap(t *testing.T) {
+	node := createTestNode()
+	// byte ranges out of order and slight gap between
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 10, high: 20})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 21, high: 30})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 9})
+
+	reduceFileCache(node, "")
+
+	if len(node.cache.byteRanges) != 3 { // (missing 9 and 20)
+		t.Error("Expected 3 byte range after reduction. Got", len(node.cache.byteRanges))
+	}
+
+	low := node.cache.byteRanges[0].low
+	high := node.cache.byteRanges[0].high
+	if low != 0 || high != 9 {
+		t.Error("Expected low=0, high=9. Got", low, high)
+	}
+}
+
+func TestReduceCacheWithGaps(t *testing.T) {
+	node := createTestNode()
+
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 200000})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 16385, high: 200000})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 131072, high: 200000})
+	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 200010, high: 300000})
+
+	reduceFileCache(node, "")
+
+	for _, br := range node.cache.byteRanges {
+		t.Log(br)
+	}
+
+	if len(node.cache.byteRanges) != 2 {
+		t.Error("Expected 2 byte ranges after reduction. Got", len(node.cache.byteRanges))
+	}
+
+}
+
+// func TestReduceCacheWithGapsAndChannel(t *testing.T) {
+// 	node := createTestNode()
+
+// 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 100})
+// 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 200, high: 300})
+// 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 302, high: 303})
+
+// 	brChan := make(chan ByteRange)
+// 	doneChan := make(chan bool)
+
+// 	go reduceFileCache(node, "")
+
+// readChannel:
+// 	for {
+// 		select {
+// 		case <-doneChan:
+// 			break readChannel
+// 		case br := <-brChan:
+// 			t.Log("Missing byte range:", br.low, br.high)
+// 		}
+// 	}
+
+// 	for _, br := range node.cache.byteRanges {
+// 		t.Log(br)
+// 	}
+
+// 	if len(node.cache.byteRanges) != 3 {
+// 		t.Error("Expected 3 byte ranges after reduction. Got", len(node.cache.byteRanges))
+// 	}
+
+// }
 
 func TestReduceCacheOutOfOrderWithGaps(t *testing.T) {
 	node := createTestNode()
@@ -204,7 +247,7 @@ func TestReduceCacheOutOfOrderWithGaps(t *testing.T) {
 	// Gap
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 40, high: 50})
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 45, high: 60})
-	// Gap
+	// Not a gap
 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 61, high: 70})
 
 	reduceFileCache(node, "")
@@ -228,7 +271,7 @@ func TestUpdateLocalCache(t *testing.T) {
 
 	// Use an endoffset (6) that is larger than the current
 	// node.data length but less than node.stat.Size
-	updateLocalCache(true, "", node, buff, 0, 6)
+	updateInMemoryCache(true, "", node, buff, 0, 6)
 
 	if len(node.cache.byteRanges) != 1 {
 		t.Error("Expected one byte range after reduction. Got", len(node.cache.byteRanges))
@@ -248,7 +291,7 @@ func TestUpdateLocalCacheNoNewByteRange(t *testing.T) {
 
 	// Use an endoffset (6) that is larger than the current
 	// node.data length but less than node.stat.Size
-	updateLocalCache(false, "", node, buff, 0, 6)
+	updateInMemoryCache(false, "", node, buff, 0, 6)
 
 	if len(node.cache.byteRanges) != 0 {
 		t.Error("Expected no byte rangse after reduction. Got", len(node.cache.byteRanges))
@@ -267,7 +310,7 @@ func TestUpdateLocalCacheNoExtendNodeData(t *testing.T) {
 	node.stat.Size = 10
 
 	// Use an endoffset (5) that same as current node.data length
-	updateLocalCache(false, "", node, buff, 0, 5)
+	updateInMemoryCache(false, "", node, buff, 0, 5)
 
 	if len(node.cache.byteRanges) != 0 {
 		t.Error("Expected no byte rangse after reduction. Got", len(node.cache.byteRanges))
@@ -278,33 +321,33 @@ func TestUpdateLocalCacheNoExtendNodeData(t *testing.T) {
 	}
 }
 
-func TestRemoteCacheFetch(t *testing.T) {
-	var offset, endoffset int64
-	file, fh := "file", uint64(1)
-	buff := make([]byte, 5)
-	node := createTestNode()
+// func TestRemoteCacheFetch(t *testing.T) {
+// 	var offset, endoffset int64
+// 	file, fh := "file", uint64(1)
+// 	buff := make([]byte, 5)
+// 	node := createTestNode()
 
-	numbbytes := getRemoteCacheData(file, fh, node, offset, endoffset, buff, mockRPCCall)
+// 	numbbytes := getRemoteCacheData(file, fh, node, offset, endoffset, buff, mockRPCCall)
 
-	if numbbytes == 0 {
-		t.Error("No data returned. Expected 5 bytes")
-	}
+// 	if numbbytes == 0 {
+// 		t.Error("No data returned. Expected 5 bytes")
+// 	}
 
-	for i := 0; i < 5; i++ {
-		if buff[i] != byte(i) {
-			t.Error("Invalid data returened from cache -", i, buff[i])
-		}
-	}
-}
+// 	for i := 0; i < 5; i++ {
+// 		if buff[i] != byte(i) {
+// 			t.Error("Invalid data returened from cache -", i, buff[i])
+// 		}
+// 	}
+// }
 
-func TestRemoteCacheFetchWithNoCacheList(t *testing.T) {
-	// should return immediately as remoteCachedFiles map is empty
-	numbbytes := tryRemoteCache("", 0, nil, 0, 0, nil)
+// func TestRemoteCacheFetchWithNoCacheList(t *testing.T) {
+// 	// should return immediately as remoteCachedFiles map is empty
+// 	numbbytes := tryRemoteCache("", 0, nil, 0, 0, nil)
 
-	if numbbytes != 0 {
-		t.Error("Expecting number of bytes to be 0. Got ", numbbytes)
-	}
-}
+// 	if numbbytes != 0 {
+// 		t.Error("Expecting number of bytes to be 0. Got ", numbbytes)
+// 	}
+// }
 
 func TestLocalCacheAfterRemoteCacheFetch(t *testing.T) {
 	//TODO: TestLocalCacheAfterRemoteCacheFetch
@@ -535,6 +578,35 @@ func TestPopulateDir(t *testing.T) {
 
 	os.RemoveAll(basedir)
 }
+
+// func TestReadWithRemoteCacheFetchOverRPC(t *testing.T) {
+
+// 	go setupRPCListener("5555")
+
+// 	remoteServers = []string{"localhost"}
+// 	filepath := "file"
+// 	remoteCachedFiles = make(map[string]string)
+// 	remoteCachedFiles[filepath] = "localhost"
+
+// 	node := createTestNode()
+// 	node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: 0, high: 5})
+// 	node.data = []byte{0, 1, 2, 3, 4}
+// 	node.stat.Size = 5
+
+// 	buff := make([]byte, 5)
+
+// 	nfsfs = newfs()
+// 	nfsfs.root.children[filepath] = node
+// 	nfsfs.Open(filepath, 0)
+
+// 	tryRemoteCache(filepath, 1, node, 0, 5, buff)
+
+// 	for i := 0; i < 5; i++ {
+// 		if buff[i] != byte(i) {
+// 			t.Error("Invalid data returned from cache -", i, buff[i])
+// 		}
+// 	}
+// }
 
 func createTestData(filepath string, subdirs int) {
 	createDir(filepath)
