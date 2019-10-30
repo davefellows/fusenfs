@@ -28,15 +28,16 @@ const (
 )
 
 var (
-	nfsmount = flag.String("nfs-mount", "c:\\temp", "The path where the NFS export has been mounted.")
+	nfsmount = flag.String("nfs-mount", "", "The path where the NFS export has been mounted.")
 
 	mntpoint  = flag.String("mount-point", "", "Where to mount the FUSE file system.")
 	thisip    = flag.String("thisip", "", "The IP address of this server for cache requests.")
-	remoteips = flag.String("remoteips", "", "Comma separate list of IPs for remote servers.")
+	remoteips = flag.String("remoteips", "", "Comma separate list of IPs for remote cache servers.")
 	rpcPort   = flag.String("remoteport", "5555", "Port to use for connection with remote servers.")
 	memLimit  = flag.Int("memlimitmb", 0, "Optionally limit how much memory can be used. Recommended, otherwise process will keep caching until something blows up.")
+	logoutput = flag.String("log", "stdout", "Set logging to stdout or a filename.")
 
-	cpuprofile = flag.String("cpuprofile", "", "Optional CPU Profile file to write.")
+	cpuprofile = flag.String("cpuprofile", "", "Optional: CPU Profile file to write.")
 
 	nfsfs       *Nfsfs
 	cachelock   sync.Mutex
@@ -123,16 +124,42 @@ type RPCHandler struct{}
 type rpcCallFunc func(method string, args interface{}, reply interface{}) error
 
 func main() {
-	flag.Parse()
-	log.SetOutput(os.Stdout)
 
 	remoteCachedFiles = make(map[string]string)
 
+	flag.Parse()
+
+	if *logoutput != "stdout" {
+		log.Println("Logging to file:", *logoutput)
+
+		//TODO: Should ideally sanitize against path traversal
+		// (though, this wouldn't ever) be exposed to malicious actors
+		f, err := os.OpenFile(*logoutput, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
+		if err != nil {
+			log.Fatalf("error opening file: %v - %v", *logoutput, err)
+		}
+		defer f.Close()
+		log.SetOutput(f)
+	} else {
+		log.Println("Logging to stdout")
+		log.SetOutput(os.Stdout)
+	}
+
 	if len(*remoteips) > 0 {
 		remoteServers = strings.Split(*remoteips, ",")
+
+		// remove this node's IP address if it's been included
+		// in the list of nodes in the cluster/pool
+		for i, ip := range remoteServers {
+			if ip == *thisip {
+				remoteServers = append(remoteServers[:i], remoteServers[i+1:]...)
+				break
+			}
+		}
 	}
 
 	log.Println("NFS mount:", *nfsmount)
+	log.Println("This node:", *thisip)
 	log.Println("Remote servers:", len(remoteServers), remoteServers)
 	log.Println("Remote port:", *rpcPort)
 	log.Println("Memory limit:", *memLimit)
@@ -323,11 +350,56 @@ func (fs *Nfsfs) Read(path string, buff []byte, offset int64, fh uint64) (numb i
 		}
 	}
 
-	updateLocalCache(newCacheItemRequired, path, node, buff, offset, endoffset)
+	// go monitorForMissingByteRanges(path, node, brChan, doneChan)
+
+	updateInMemoryCache(newCacheItemRequired, path, node, buff, offset, endoffset)
 
 	node.stat.Atim = fuse.Now()
 	return numb
 }
+
+// func monitorForMissingByteRanges(path string, node *Node, brChan <-chan ByteRange, doneChan <-chan bool) {
+
+// 	var newByteRanges []ByteRange
+
+// 	for {
+// 		select {
+// 		case <-doneChan:
+// 			// retrieve byte ranges from NFS
+// 			for _, br := range newByteRanges {
+// 				log.Println("Getting missing BR:", br.low, br.high, path)
+
+// 				newbuff := make([]byte, br.high-br.low+1)
+// 				numb := readFileFromLocalNFSMount(path, node, newbuff, br.low, br.high)
+
+// 				if numb > 0 {
+// 					copy(node.data[br.low:br.high], newbuff)
+// 					node.cache.lock.Lock()
+// 					node.cache.byteRanges = append(node.cache.byteRanges, &ByteRange{low: br.low, high: br.high})
+// 					node.cache.lock.Unlock()
+
+// 				}
+// 			}
+// 			go reduceFileCache(node, path)
+// 			return
+// 		case br := <-brChan:
+// 			log.Println("Missing byte range:", br.low, br.high, path)
+
+// 			newByteRanges = append(newByteRanges, br)
+
+// 			// newbuff := make([]byte, br.high-br.low+1)
+// 			// numb := readFileFromLocalNFSMount(path, node, newbuff, br.low, br.high)
+
+// 			// if numb > 0 {
+// 			// 	copy(node.data[br.low:br.high], newbuff)
+
+// 			// upload local cache but pass nil for channels so we don't risk
+// 			// creating a mess of endless goroutines going around in circles!
+// 			// updateLocalCache(true, path, node, newbuff, br.low, br.high, nil, nil, false)
+// 			// }
+// 		}
+// 	}
+// }
 
 func calcOffsets(path string, node *Node, offset int64, buff []byte) (int64, int64) {
 	endoffset := offset + int64(len(buff))
@@ -711,7 +783,7 @@ func (fs *Nfsfs) lookupNode(filepath string, ancestor *Node) (parent *Node, name
 			node = node.children[c]
 
 			if node == nil {
-				log.Println("lookupNode() node nil, calling populateDir()", path.Dir(filepath), filepath, c)
+				log.Println("lookupNode() node nil, calling populateDir()", filepath)
 				//TODO: Optimize this
 				_, _ = fs.openNode(path.Dir(filepath), true)
 				_ = fs.populateDir(path.Dir(filepath), nil)
