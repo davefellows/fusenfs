@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"math"
 	"runtime"
 	"sort"
 	"time"
@@ -19,7 +20,7 @@ func updateInMemoryCache(newByteRangeRequired bool, path string, node *Node, buf
 	if *memLimit != 0 {
 		memUsedMB := getMemoryUsedMB()
 		if memUsedMB > *memLimit {
-			log.Println("Memory Used MB:", memUsedMB, "Limit:", *memLimit)
+			log.Println("Freeing memory. Memory Used MB:", memUsedMB, " Limit:", *memLimit)
 			// remove least recently accessed items from cache
 			freeMemory(memUsedMB - *memLimit)
 		}
@@ -121,7 +122,7 @@ func reduceFileCache(node *Node, filepath string) {
 	}
 }
 
-// fetchLocalCacheData scans the in memory cache for the
+// fetchMemCacheData scans the in memory cache for the
 // file and requested byte range. Copies to buff if found.
 func fetchMemCacheData(path string, node *Node, offset, endoffset int64, buff []byte) (numBytes int, newCacheItemRequired bool) {
 
@@ -137,14 +138,14 @@ func fetchMemCacheData(path string, node *Node, offset, endoffset int64, buff []
 
 		if offset >= br.low && offset < br.high {
 			log.Println("fetchMemCacheData() - extend cache up", offset, endoffset, br.low, br.high, path)
-			// extend cache
+			// extend higher end of cached range
 			br.high = endoffset
 			newCacheItemRequired = false
 		}
 
 		if endoffset < br.high && endoffset > br.low {
 			log.Println("fetchMemCacheData() - extend cache down", offset, endoffset, br.low, br.high, path)
-			// extend lower end of cache
+			// extend lower end of cached range
 			br.low = offset
 			newCacheItemRequired = false
 		}
@@ -175,6 +176,7 @@ func freeMemory(memToFreeMB int) {
 		return
 	}
 
+	// sort the cached nodes collection so the oldest items appear first
 	cachelock.Lock()
 	sort.Slice(cachedNodes, func(i, j int) bool {
 		return cachedNodes[i].lastAccessed.Before(cachedNodes[j].lastAccessed)
@@ -182,25 +184,34 @@ func freeMemory(memToFreeMB int) {
 
 	log.Println("CachedItems - Before:", len(cachedNodes))
 
-	freedMem := 0
+	var freedMem float64 = 0
 	count := 0
 	for i := 0; i < len(cachedNodes); i++ {
-		freedMem += len(cachedNodes[0].node.data)
+		// convert to MB
+		size := float64(len(cachedNodes[0].node.data)) / 1024 / 1024
+		// don't bother removing if it's < 500KB
+		if size < 0.5 {
+			// log.Printf("CachedItem skipped: %v, Size: %v MB \n", cachedNodes[i].path, math.Round(size*100)/100)
+			continue
+		}
+
+		log.Printf("CachedItem removed: %v, Size: %v MB \n", cachedNodes[i].path, math.Round(size*100)/100)
+
+		freedMem += size
 		count++
 
 		cachedNodes[i].node.cache.lock.Lock()
-		//TODO: Check this change still frees memory
 		cachedNodes[i].node.cache.byteRanges = nil
 		cachedNodes[i].node.cache.lock.Unlock()
 		cachedNodes[i].node.data = []byte{}
 
-		if freedMem >= memToFreeMB {
+		if int(freedMem) >= memToFreeMB {
 			break
 		}
 	}
 
 	cachedNodes = cachedNodes[count:]
-	log.Println("CachedItems - After:", len(cachedNodes), count)
+	log.Printf("CachedItems - After: %v, number removed: %v\n", len(cachedNodes), count)
 	cachelock.Unlock()
 
 	// Call GC
