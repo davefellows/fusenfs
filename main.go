@@ -30,12 +30,13 @@ const (
 var (
 	nfsmount = flag.String("nfs-mount", "", "The path where the NFS export has been mounted.")
 
-	mntpoint  = flag.String("mount-point", "", "Where to mount the FUSE file system.")
-	thisip    = flag.String("thisip", "", "The IP address of this server for cache requests.")
-	remoteips = flag.String("remoteips", "", "Comma separate list of IPs for remote cache servers.")
-	rpcPort   = flag.String("remoteport", "5555", "Port to use for connection with remote servers.")
-	memLimit  = flag.Int("memlimitmb", 0, "Optionally limit how much memory can be used. Recommended, otherwise process will keep caching until something blows up.")
-	logoutput = flag.String("log", "stdout", "Set logging to stdout or a filename.")
+	mntpoint    = flag.String("mount-point", "", "Where to mount the FUSE file system.")
+	fscachepath = flag.String("fscachepath", "", "Path where to cache files to the filesystem.")
+	thisip      = flag.String("thisip", "", "The IP address of this server for cache requests.")
+	remoteips   = flag.String("remoteips", "", "Comma separate list of IPs for remote cache servers.")
+	rpcPort     = flag.String("remoteport", "5555", "Port to use for connection with remote servers.")
+	memLimit    = flag.Int("memlimitmb", 0, "Optionally limit how much memory can be used. Recommended, otherwise process will keep caching until something blows up.")
+	logoutput   = flag.String("log", "stdout", "Set logging to stdout or a filename.")
 
 	cpuprofile = flag.String("cpuprofile", "", "Optional: CPU Profile file to write.")
 
@@ -178,7 +179,8 @@ func main() {
 		go setupRPCListener(*rpcPort)
 	}
 
-	cachePath = setupLocalFSCache(cacheDir)
+	cachePath = path.Join(*fscachepath, cacheDir)
+	setupLocalFSCache(cachePath)
 
 	// start go routine to monitor for changes to files that are cached
 	go evictModifiedFilesFromCacheLoop()

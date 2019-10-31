@@ -9,24 +9,17 @@ import (
 	"time"
 )
 
-func setupLocalFSCache(cacheDir string) (cachePath string) {
-	// get the user's current home directory
-	// usr, err := user.Current()
-	// if err != nil {
-	// 	log.Fatalln(err)
-	// }
-	cachePath = path.Join("/mnt/resource/fusenfs/", cacheDir)
+func setupLocalFSCache(cachePath string) {
 	// create cache dir if doesn't already exist
-	err := os.MkdirAll(cachePath, 0777)
+	//TODO: Reduce perms. Just temporarily set to 777 to debug an issue
+	err := os.MkdirAll(cachePath, 0700)
 	if err != nil {
 		log.Panicln(err)
 	}
 	log.Println("Created local filesystem cache dir:", cachePath)
 
-	// remove changed files
+	// remove any changed files
 	go deleteLocalCacheFilesIfModified(cachePath, *nfsmount, getFileModTimeFromNFS)
-
-	return cachePath
 }
 
 func deleteLocalCacheFilesIfModified(cachePath, nfsPath string, getFileModTime func(path string) time.Time) (removedFiles []string) {
